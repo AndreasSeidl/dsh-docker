@@ -1,0 +1,69 @@
+# DeepSeek Harness container — convenience compose wiring.
+#
+#   docker compose up -d --build      # requires `make context` first
+#   open http://127.0.0.1:3080
+#
+# Network: the GUI is reachable on every host interface by default (set
+# DSH_WEB_PUBLISH_HOST=127.0.0.1 to restrict to the host). There is NO
+# authentication yet — the bundled reverse proxy is the documented place to add
+# one later; until then keep it on a trusted network or set
+# DSH_WEB_TRUSTED_HOSTS to the authority users reach it by (the proxy then
+# refuses any other Host with 403).
+#
+# Hardening (from the container best-practices pass): read-only rootfs with
+# only the two volumes + a tmpfs writable, no Linux capabilities, no privilege
+# escalation, and a pid cap so a runaway agent can't exhaust the host.
+#
+# NOTE on the tmpfs: it must stay EXEC-capable. The harness's spill store
+# mkdtemp's under /tmp and dynamic bundle loading imports/extracts from there;
+# `noexec` makes first boot die with ERR_MODULE_NOT_FOUND / EROFS. We keep
+# nosuid+nodev and a size cap instead.
+
+services:
+  dsh:
+    build:
+      # Requires `make context` first: this directory is the staged build
+      # context (a pruned copy of the harness source + Dockerfile + helpers).
+      context: .docker-context
+      args:
+        DSH_CLIENT_COMMIT_HASH: ${DSH_COMMIT:-b150a55}
+    image: dsh:dev
+    container_name: dsh
+    ports:
+      - "${DSH_WEB_PUBLISH_HOST:-0.0.0.0}:${DSH_WEB_PORT:-3080}:${DSH_WEB_PORT:-3080}"
+    environment:
+      # Proxy mode: the web app listens loopback-only on DSH_APP_PORT (3081);
+      # the bundled reverse proxy publishes DSH_WEB_PORT on DSH_WEB_BIND,
+      # rewriting Host/Origin to loopback so the /api trust fence and the
+      # same-origin page both work over the network with no further config.
+      DSH_WEB_PROXY: "1"
+      DSH_WEB_BIND: "0.0.0.0"
+      DSH_WEB_PORT: "${DSH_WEB_PORT:-3080}"
+      # DSH_WEB_TRUSTED_HOSTS: comma/space-separated Host allow-list enforced by
+      # the proxy (403 otherwise), e.g. "dsh.example.com" or "192.168.1.50".
+      # DSH_TELEMETRY_DISABLED: "1"
+      # DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL and other provider envs pass through
+      # from your shell or .env:
+      # DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+    volumes:
+      # THE harness data lives here: profiles (with the user's own patch
+      # layer), session history, credentials, settings, and any plugins.
+      - dsh-home:/home/dsh/.dsh
+      # The agent's workspace: the directory sessions start in and where the
+      # model writes/edits files. Back it with a host bind to work on real
+      # code, e.g. `- ${PWD}:/workspace`:
+      #   - ./workspace:/workspace
+      - dsh-workspace:/workspace
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+    restart: unless-stopped
+
+volumes:
+  dsh-home:
+  dsh-workspace:

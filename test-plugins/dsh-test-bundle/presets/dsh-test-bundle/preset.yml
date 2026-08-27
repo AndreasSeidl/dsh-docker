@@ -1,0 +1,2 @@
+name: dsh-test-bundle fixture
+description: Sample agent preset shipped with @dsh-test/bundle-all (copy into $DSH_HOME/.agent-presets/).

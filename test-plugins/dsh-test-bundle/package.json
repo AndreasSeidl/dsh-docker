@@ -1,0 +1,35 @@
+{
+  "name": "@dsh-test/bundle-all",
+  "version": "0.1.0",
+  "description": "DSH harness (0.1+) plugin test bundle: proves install scripts, dsh.bundle patch-layer reconciliation, self-mounting out-of-tree Cordis plugins, and agent-preset authoring inside the container.",
+  "type": "module",
+  "main": "./lib/index.js",
+  "exports": {
+    ".": "./lib/index.js",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "cordis.patch.yml",
+    "presets",
+    "scripts"
+  ],
+  "scripts": {
+    "postinstall": "node ./scripts/postinstall.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-bundle",
+    "plugin",
+    "test"
+  ],
+  "license": "MIT"
+}

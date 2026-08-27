@@ -1,0 +1,20 @@
+# DeepSeek Harness — settings (container default scaffold).
+#
+# This file is written once on the FIRST boot of an empty $DSH_HOME volume.
+# It is deliberately empty: with no keys set, every knob uses the harness's
+# stock default, which keeps the container exactly equivalent to `pnpm dsh web`
+# until you edit this file. The harness auto-creates this file when it is
+# missing, so you can equally delete the whole file and start from scratch.
+#
+# Uncomment and adjust the keys you need (see the harness docs / the Settings
+# page in the web UI for the exact schema):
+#
+# provider: deepseek
+# providers:
+#   deepseek:
+#     apiKey: sk-...
+#     baseURL: https://api.deepseek.com
+#
+# model: deepseek-chat
+# temperature: 0.7
+# locale: en-US

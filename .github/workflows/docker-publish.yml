@@ -1,0 +1,129 @@
+# Build and publish the dsh container image to GHCR.
+#
+#   * On a git TAG (e.g. `v0.1.1-rc.2` or `0.1.1-rc.2`) → build the harness at
+#     that upstream version and push
+#       ghcr.io/<owner>/dsh-container:<version>
+#       ghcr.io/<owner>/dsh-container:latest
+#   * Every Monday 03:30 UTC → build the upstream default branch and push
+#       ghcr.io/<owner>/dsh-container:nightly   (keeps "latest source" rolling)
+#   * Manually (workflow_dispatch, `version` input) → build any upstream
+#     tag/commit and push <version>.
+#
+# Multi-arch: linux/amd64 + linux/arm64 (QEMU-emulated cross-build; the builder
+# carries a C toolchain so native addons compile when a prebuild is missing).
+name: docker-publish
+
+on:
+  push:
+    tags: ['v*', '[0-9]*']
+  schedule:
+    - cron: '30 3 * * 1'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream dsh version/tag to build (default: upstream default branch)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo (recipe + build scripts)
+        uses: actions/checkout@v4
+
+      - name: Resolve release version
+        id: version
+        run: |
+          VERSION=""
+          if [ "${{ github.event_name }}" = "push" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            VERSION="${VERSION#v}"                 # accept both v0.1.1-rc.2 and 0.1.1-rc.2
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve upstream ref
+        id: upstream
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          if [ -n "$VERSION" ] \
+             && git ls-remote --exit-code --refs \
+                  https://github.com/deepseek-ai/deepseek-harness.git \
+                  "refs/tags/$VERSION" >/dev/null 2>&1; then
+            echo "ref=$VERSION"
+          else
+            echo "ref=master"
+          fi | tee -a "$GITHUB_OUTPUT"
+
+      - name: Checkout harness source
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ steps.upstream.outputs.ref }}
+          path: upstream
+
+      - name: Capture source commit
+        id: commit
+        run: echo "commit=$(git -C upstream rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the build context
+        run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
+
+      - name: Set up buildx + QEMU
+        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: tags
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          if [ -n "$VERSION" ]; then
+            printf 'tags=%s\nlatest\n' "$VERSION" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "tags=nightly" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .docker-context
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # Warm-cache plumbing (keeps repeated/CI builds from being cold):
+          #   * gha    — GitHub Actions cache backend (fast, repo-scoped, ~7d TTL
+          #              for big caches; enough for same-week iteration).
+          #   * registry — persistent cache manifest next to the image on GHCR
+          #              (survives GC, keeps the weekly builds warm).
+          # mode=max stores intermediate layers so the builder stages (~90% of
+          # the compile cost) are reused, not just the final runtime image.
+          cache-from: |
+            type=gha
+            type=registry,ref=${{ env.IMAGE }}:buildcache
+          cache-to: |
+            type=gha,mode=max
+            type=registry,mode=max,ref=${{ env.IMAGE }}:buildcache
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.description=DeepSeek Harness (dsh web) container
+          build-args: |
+            DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}

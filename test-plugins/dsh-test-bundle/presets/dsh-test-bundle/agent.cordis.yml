@@ -1,0 +1,36 @@
+# Sample agent preset shipped with @dsh-test/bundle-all.
+#
+# A preset is a DIRECTORY (named with its preset id) holding this
+# `agent.cordis.yml` composition, optionally beside a `preset.yml` for display
+# text. To make it available to a running profile, copy the whole `dsh-test-bundle`
+# directory into `$DSH_HOME/.agent-presets/dsh-test-bundle/` (the user preset
+# root, discovered at runtime — no restart needed).
+#
+# What a preset can touch: it is a Cordis composition mounted into the agent's
+# own realm per session. It composes the persona system prompt, which model
+# tools are registered, whether/how a PTY shell stack mounts, context
+# compaction, and integration points — the same list format as the profile boot
+# include, with `!!js` expressions allowed. Harness docs treat a preset as
+# carrying the SAME TRUST AS SHELL ACCESS (an agent must be able to author the
+# environment it runs in).
+- id: persona
+  name: '@deepseek-ai/dsh-persona'
+  config:
+    text: You are the dsh-test-bundle fixture agent. Reply tersely.
+    complete: true
+    includeRuntimeContext: false
+
+- id: persistent-shell
+  name: cordis:group
+  group: true
+  isolate:
+    terminals: true
+  config:
+    - id: pty
+      name: '@deepseek-ai/dsh-terminal'
+
+    - id: persistent-bash
+      name: '@deepseek-ai/dsh-tool-bash-persistent'
+      disabled: !!js process.platform === 'win32'
+      config:
+        timeoutMs: 300000

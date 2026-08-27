@@ -1,0 +1,34 @@
+# @dsh-test/bundle-all — profile patch layer (dsh `dsh.bundle` API, v0.1+).
+#
+# A bundle's `cordis.patch.yml` is a top-level list of loader patch entries
+# applied ON TOP of the shipped bundle layers (dsh-base, then the mode bundle,
+# then this one). Last write wins per row id:
+#
+#   { id, ...overrides }    override/extend an existing row (name/config/disabled/...)
+#   { insert: [rows] }      append rows at the include root
+#   { id, insert: [rows] }  append rows inside a named group
+#
+# A patch that names a row the installed harness does not ship (a target that
+# moved between 0.1.x releases) warns and skips, so this bundle stays
+# installable across the 0.1 line. `!!js` scalars evaluate as JavaScript in
+# the loader's expression scope (safe here: a runtime-computed marker path).
+- id: tool-bash
+  # Override a shipped row with a sentinel config. This is the deterministic
+  # "the patch layer applied" probe: the value shows up verbatim in
+  # `dsh --profile <name> --dump-default-config`. tool-bash is DISABLED in the
+  # web profile, so swapping its config is strictly cosmetic and cannot change
+  # behavior; add/remove of the bundle is what the displace probe flips.
+  config:
+    testMarker: "dsh-test-bundle/0.1.0"
+
+- insert:
+    # A brand-new row that mounts THIS package as a Cordis plugin. The row is a
+    # real out-of-tree plugin (not part of the dsh installation): the loader
+    # resolves its bare name from the profile directory's node_modules and
+    # applies it in-process. When it mounts it writes a marker file and logs a
+    # line — the end-to-end proof that an arbitrary new plugin boots.
+    - id: dsh-test-sentinel
+      name: '@dsh-test/bundle-all'
+      config:
+        marker: "dsh-test-sentinel/0.1.0"
+        markerPath: !!js process.env.DSH_HOME + "/dsh-test-sentinel.marker"

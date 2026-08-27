@@ -1,0 +1,19 @@
+# Build/experiment artifacts
+.docker-context/
+.docker-cli/
+.rt-exp/
+.rt-exp2/
+.pnpm-store/
+*.log
+
+# Editor/OS noise
+.DS_Store
+
+# Local research copies (community docker repos)
+.research/
+
+# Context fingerprint
+.docker-context.stamp
+
+# Benchmark scratch
+bench/
