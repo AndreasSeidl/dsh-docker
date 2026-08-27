@@ -88,17 +88,43 @@ RUN --mount=type=cache,target=/pnpm-cache \
 FROM install AS builder
 ARG DSH_CLIENT_COMMIT_HASH=b150a55
 ENV DSH_CLIENT_COMMIT_HASH=${DSH_CLIENT_COMMIT_HASH}
-COPY --exclude=Dockerfile --exclude=.container --exclude=pnpm-manifests . ./
+COPY --exclude=Dockerfile --exclude="Dockerfile.*" --exclude=.container --exclude=pnpm-manifests . ./
 # Fulfil lifecycle scripts (root lefthook postinstall, node-pty/koffi/esbuild
 # build scripts, workspace member postinstalls) now the source exists.
 RUN --mount=type=cache,target=/pnpm-cache \
     pnpm install --frozen-lockfile
 # Compile the host libs, client libs, and the web frontend (`pnpm run build`,
 # the exact command the project's own dev flow uses).
-# A3 experiment: run the host and client lib builds concurrently (tsc -b host
-# ~26s, tsc -b client ~15s — serial today). Byte-diff-gated: output must equal
-# the serial build. Vite (web) still runs last, it consumes both.
-RUN sh -c 'pnpm run build:lib:host & pnpm run build:lib:client & wait; pnpm run build:web'
+# R3 (round 3) incremental compile: run the host and client lib builds
+# concurrently (from A3) AND persist the compile state (every lib/, dist/ and
+# *.tsbuildinfo) on a BuildKit cache mount. On a source-edit iteration the
+# restored state lets `tsc -b` recompile only the affected project graph while
+# tsdown re-packages (measured: 32.9 s full-image iteration vs 47.9 s compile
+# alone before; outputs verified byte-identical to a clean build).
+RUN --mount=type=cache,target=/pnpm-cache \
+    --mount=type=cache,target=/tscache,id=tscache-r3b <<'R3INC'
+set -e
+# Restore the previous build's compiled state (relative paths; see save()).
+restore() {
+  if [ -f /tscache/art.tar ]; then
+    tar -C /build -xf /tscache/art.tar
+    # Guard: a relative-path archive must never leave a stray /build dir
+    # (round-2 A2 hit this; a poisoned mount restored build/... into /build).
+    rm -rf /build/build
+  fi
+}
+save() {
+  rm -f /tscache/art.tar
+  (cd /build \
+    && { find . -path './node_modules' -prune -o -type d \( -name lib -o -name dist \) -print; } > /tmp/outdirs \
+    && find . -name '*.tsbuildinfo' -not -path '*/node_modules/*' -print >> /tmp/outdirs \
+    && tar -c -f /tscache/art.tar -T /tmp/outdirs)
+}
+restore
+sh -c 'pnpm run build:lib:host & pnpm run build:lib:client & wait; pnpm run build:web'
+save
+R3INC
+
 # The root postinstall (lefthook git hooks) is dev-only; drop it from the
 # runtime manifest.
 RUN node -e "const fs=require('fs');const p='/build/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));if(j.scripts&&j.scripts.postinstall)delete j.scripts.postinstall;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
@@ -201,11 +227,14 @@ FROM ${NODE_BASE} AS runtime
 # Runtime OS packages: bash (the model-facing shell tools spawn it), git,
 # curl (web tools + healthcheck), ca-certificates (TLS), and tini (PID 1:
 # reaps the orphaned/zombie children an agent's shell commands leave behind).
-# A C/native toolchain is installed BY DEFAULT so `dsh plugin add <pkg>` can
-# compile native addons (node-pty, sharp, ...) at runtime without a prebuild
-# matching; set DSH_INCLUDE_BUILD_TOOLS=0 to drop it and shrink the image
-# (plugin installs that need a compiler will then fail).
-ARG DSH_INCLUDE_BUILD_TOOLS=1
+# Whether to bake a C/native toolchain (gcc g++ make python3 pkg-config) so
+# `dsh plugin add <pkg>` can compile native addons (node-pty, sharp, ...) at
+# runtime without a matching prebuild. DEFAULT OFF: the harness itself never
+# compiles at runtime (its own native addons are built at image build), and
+# skipping the ~100 MB compressed toolchain layer is what brings the image
+# under the 250 MB goal. Set DSH_INCLUDE_BUILD_TOOLS=1 for the full image
+# (plugin installs that need a compiler will then work).
+ARG DSH_INCLUDE_BUILD_TOOLS=0
 # Round-2 B1: build-essential drags in dpkg-dev/fakeroot/etc.; node-gyp only
 # needs the compiler + python3 + make. Use the minimal set (still compiles
 # node-pty-style addons); verified by scripts/plugin-test.sh.

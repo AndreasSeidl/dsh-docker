@@ -13,7 +13,7 @@ and the built browser app. Nothing else runs or mounts on top.
 |---|---|
 | Default behavior | Identical to `pnpm dsh web`: serves the GUI on `http://127.0.0.1:3080`, uses `$DSH_HOME` (= `~/.dsh`) for all harness data, fetches the same model config (via `settings.yaml` / credentials on the volume). |
 | Network mode | `DSH_WEB_PROXY=1` (set by `make run` and `docker-compose.yml`) adds a bundled reverse proxy: the web app stays loopback-only and the proxy publishes the port on the network — so the GUI *just works* over LAN/IP without extra config, and it is the documented place to add authentication later. |
-| Footprint | ~500 MB tree base; see [Size](#size) for measured numbers. Native-build toolchain included by default so `dsh plugin add` can compile (opt out with `INCLUDE_BUILD_TOOLS=0`). |
+| Footprint | ~211 MiB transferred-compressed by default; see [Size](#size) for measured numbers. The native-build toolchain is an opt-in (`INCLUDE_BUILD_TOOLS=1`) so the default image stays under 250 MB. |
 | User | Runs as an unprivileged `dsh` user, under `tini` (PID 1), with a hardened compose profile (`read_only` rootfs, no capabilities, no privilege escalation, pid cap). |
 | Config | Everything the harness exposes is reachable through environment variables (see [Configuration](#configuration)). |
 | Runs anywhere | `node apps/cli/lib/bin.js` is the prebuilt CLI; there is no source, repo, or pnpm dev-tooling in the runtime image (pnpm remains so `dsh plugin` still works). |
@@ -186,9 +186,11 @@ The image is set up so installs work with no extra steps:
   market) and its global config bakes in `dangerouslyAllowAllBuilds: true` —
   dependency build scripts (prebuilt downloads and `node-gyp` compiles) run
   without interactive approval;
-- a **C/native toolchain** (`build-essential`, `python3`, `pkg-config`) is in
-  the runtime so plugins that compile native addons build even when no prebuilt
-  binary matches (drop it with `INCLUDE_BUILD_TOOLS=0`);
+- a **C/native toolchain** is NOT baked in by default (that would push the
+  image past 250 MB). Rebuild with `make build INCLUDE_BUILD_TOOLS=1` for a
+  variant in which plugins that compile native addons build even when no
+  prebuilt binary matches. The default image still installs pure-JS and
+  prebuilt-native plugins;
 - pnpm's **content store lives on the `$DSH_HOME` volume** (`.pnpm-store`), so
   installs are fast and survive container recreation.
 
@@ -289,16 +291,22 @@ make build TAG=edge INCLUDE_AGENT_CLIS=1
 
 ## Size
 
-Measured for the default build (no agent CLIs), `linux/amd64`:
+Measured for the default build (no agent CLIs), `linux/amd64`, as the
+gzip'd `docker save` payload (the "compressed" size you actually transfer):
 
-- **~1.5 GB uncompressed, ~300 MB when pulled/transferred (compressed)** with
-  the native-build toolchain included (the default).
-- `make build INCLUDE_BUILD_TOOLS=0` drops the compiler/python3 set for a
-  leaner image (~1.1 GB uncompressed / ~220 MB compressed); `dsh plugin add`
-  of packages that need a native compile will then fail.
+- **Default: ~1.1 GB uncompressed / ~211 MiB (~221 MB) compressed** — the
+  C/native toolchain is **not** baked in by default (round-3); this is what
+  keeps the image under the 250 MB goal while the harness remains fully
+  functional (its own native addons are compiled once at image build).
+- `make build INCLUDE_BUILD_TOOLS=1` re-adds the compiler/python3 set for a
+  **~1.5 GB uncompressed / ~303 MiB (~317 MB)** image such that `dsh plugin add`
+  can compile native addons at runtime.
 
-The toolchain is kept by default because "plugin installs work" beats a few
-tens of MB of compressed size; set the flag for a minimal runtime.
+The harness core never compiles at runtime, so the default (toolchain-less)
+image runs the web GUI, sessions, models, MCP, and pure-JS/prebuilt plugins
+unimpaired — the full smoke/compose suites pass on it. Only plugin installs
+that need a C++/Python compile (no matching prebuilt binary) require the
+`INCLUDE_BUILD_TOOLS=1` variant.
 
 ## CI: automatic publishing on release tags
 
@@ -356,16 +364,19 @@ first (`--ignore-scripts`), with lifecycle scripts deferred to a second, idempot
 install after the source lands (~1 s no-op on a source edit). The pnpm store rides
 a BuildKit cache mount so downloads and native compiles persist between builds.
 Warm-cache measurements (source-edit iteration, same machine, `plans/docker-build-speedup.md`
-has the full variant matrix and raw logs):
+has the full variant matrix and raw logs; round-3 numbers measured 2025-08-27):
 
-| Rebuild scenario                           | Before   | After          |
-|--------------------------------------------|----------|----------------|
-| source-edit iteration (one-line change)    | ~4.2 min | **~2.0 min**   |
-| unchanged source (`make build` twice)      | ~2.5–3 min | **≈ 5–10 s** |
-| clean warm-up build                        | ~2.5–3 min | **~1.8 min** |
+| Rebuild scenario                           | round-1  | round-2  | round-3 (current) |
+|--------------------------------------------|----------|----------|-------------------|
+| source-edit iteration (one-line change)    | ~4.2 min | ~1.1 min | **~33 s**         |
+| unchanged source (`make build` twice)      | ~3 min   | ~1.9 s   | **~1.5 s**        |
+| clean warm-up build (cold editor cache)    | ~3 min   | ~55 s    | **~59 s** (first build after Dockerfile change) |
 
-The remaining ~2 min on a source edit is the actual compile (`pnpm run build`,
-~58 s — pure CPU, not cacheable) plus the production-closure re-link (~50 s).
+Round-3 now persists the **compile state** (every `lib/`, `dist/` and
+`*.tsbuildinfo`) on a BuildKit cache mount, so `tsc -b` recompiles only the
+affected project graph on a source edit (~48 s compile → ~17 s; outputs verified
+byte-identical to a clean build). The prod-closure re-link was already split
+into a lockfile-keyed stage in round-2, so source edits never pay it.
 Trade-offs, all tested: `pnpm prune --prod` and incremental `--prod` installs are
 faster but leave dev packages in a pnpm workspace's shared `.pnpm` store and break
 member links, so the Dockerfile keeps the (correct) offline reinstall; the

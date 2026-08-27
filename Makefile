@@ -27,9 +27,10 @@ BUILD_ARGS   := --build-arg DSH_CLIENT_COMMIT_HASH=$(DSH_COMMIT)
 
 # Include the optional agent-CLI binaries? Off by default (saves ~560 MB).
 BUILD_ARGS   += --build-arg DSH_INCLUDE_AGENT_CLIS=$(if $(filter 1 yes on,$(INCLUDE_AGENT_CLIS)),1,0)
-# Include the runtime native-build toolchain? On by default so `dsh plugin add`
-# can compile native addons; set INCLUDE_BUILD_TOOLS=0 for a leaner image.
-BUILD_ARGS   += --build-arg DSH_INCLUDE_BUILD_TOOLS=$(if $(filter 0 no off,$(INCLUDE_BUILD_TOOLS)),0,1)
+# Include the runtime native-build toolchain? OFF by default (this is what
+# keeps the image under 250 MB); set INCLUDE_BUILD_TOOLS=1 so `dsh plugin add`
+# can compile native addons at runtime.
+BUILD_ARGS   += --build-arg DSH_INCLUDE_BUILD_TOOLS=$(if $(filter 1 yes on,$(INCLUDE_BUILD_TOOLS)),1,0)
 
 # Host port for `make run` (inside the container the same value is used).
 PORT         ?= 3080

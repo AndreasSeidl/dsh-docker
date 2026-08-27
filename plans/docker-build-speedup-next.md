@@ -200,3 +200,22 @@ full suite after tree-changing steps; never edit a runner while it runs.
   `.github/workflows/docker-publish.yml`).
 - Final measured: warm 55 s, edit-iteration 67 s, steady-state 1.9 s,
   compressed export 303 M.
+
+
+### Round-3 status — RESOLVED (2025-08-27)
+- **A2 revised (incremental tsc state): DONE — WORKS now.** The round-2 A2
+  failure was a poisoned, stale `id=tscache` archive (absolute paths from its
+  own attempt 1) + no restore guard, not an inherent limit. Fixed via a fresh
+  mount id + `rm -rf /build/build` guard + strictly relative tar paths.
+  Compile on a one-file edit: ~48 s → ~17 s; full-image iteration 64 s → 32.4 s.
+- **Slim default (runtime toolchain off): DONE.** Default image now 211 MiB
+  gzip-export / 222 MB docker CONTENT SIZE. `INCLUDE_BUILD_TOOLS=1` keeps the
+  full 303 MiB image for native-compile plugin installs. Harness smoke/compose
+  suites pass on the slim default.
+- B1 minimal toolchain, B2 hard-link dedupe, B3 junk carve, A1 prod-deps
+  split, A3 parallel compile: all retained (rounds 1–2) — final ship combines
+  A1 + A2(corrected) + A3 + B2 + B3 + slim-default.
+- B4 research updated: typescript (via typert/generator) and rolldown/esbuild
+  (dev tooling) remain in the prod .pnpm tree; prunable in principle but not
+  needed for the 250 MB target — left for a future round with per-package boot
+  profiling.

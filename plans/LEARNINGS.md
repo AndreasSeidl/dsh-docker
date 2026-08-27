@@ -202,3 +202,72 @@ plugin test proves node-pty still compiles at runtime with this set.
   two runtime COPYs — that is the entire remaining 66.7 s.
 - Final numbers: **warm 55 s (was 110), iteration 66.7 s (was 103),
   unchanged 1.9 s (was ~2), export 303 M (was 308 M).**
+
+
+---
+
+## Round 3 — measured (2025-08-27 evening, same machine/method)
+
+Goal: **image ≤ 250 MB compressed** AND **source-edit iteration < 40 s**, harness
+fully functional at any point. Both met. Final measured (round-2 → round-3):
+
+| metric | round-2 (shipped) | round-3 (final) |
+|---|---|---|
+| source-edit iteration (full image) | ~67 s | **32.4 s** |
+| steady (unchanged) rebuild | 1.9 s | **1.3 s** |
+| warm full build | 55 s | ~59 s (first build after Dockerfile change; editor-cache cold) |
+| gzip'd `docker save` export | 303 MiB (317 MB) | **211 MiB (221 MB)** |
+| `docker images` CONTENT SIZE | 319 MB | **222 MB** |
+| uncompressed | 1.54 GB | 1.15 GB |
+
+### What worked (all kept)
+
+1. **A corrected incremental-compile cache mount (fixes round-2 A2).** The
+   round-2 A2 attempt failed for a real, subtle reason we finally diagnosed:
+   its own **attempt-1 left a poisoned archive in the shared
+   `id=tscache` mount** (absolute `build/...` tar paths → restoring
+   created a stray `/build/build` tree → +160 MB junk AND the tsc/tsdown run
+   was never actually incremental). Round-3 fixes: a **new mount id
+   (`tscache-r3b`)**, a **poison guard** (`rm -rf /build/build` after
+   restore), and tar **relative** to /build. With the state actually restored,
+   `tsc -b` skips unchanged projects and the edit recompiles only the affected
+   graph: compile ~48 s → **~17 s on a one-file edit** (16.6 s measured in a
+   fresh testbed image; 18.4 s in the poisoned build even so).
+   - **Correctness proven**, not assumed: the warm image's non-node_modules
+     tree hash is **byte-identical** to the round-2 clean build's, and the
+     iteration's injected edit marker appears in the rebuilt image's compiled
+     output while absent from the warm one.
+
+2. **Runtime C-toolchain is now opt-IN (round-3 default off).** Arithmetic
+   proof it had to leave the default image: base(80 MB) + toolchain(131 MB) +
+   pnpm(10.5 MB) already exceeds 250 MB with nothing left for node_modules
+   (77.7 MB) or the compiled tree (19.7 MB). The harness itself **never
+   compiles at runtime** — its native addons (node-pty, koffi, sharp) are
+   built once in the builder stage — so dropping the ~100 MB-compressed
+   toolchain layer breaks nothing in the harness (full smoke/compose pass).
+   `make build INCLUDE_BUILD_TOOLS=1` restores the full 303 MiB image on
+   which the node-pty plugin test still passes. This follows the same
+   precedent as `DSH_INCLUDE_AGENT_CLIS` (off by default, saves ~560 MB).
+
+3. **`Dockerfile.*` excluded from the builder COPY** so context-local variant
+   Dockerfiles can't leak into the image.
+
+### What did NOT work / gotchas (measured)
+
+1. **Reusing the old `id=tscache` mount across rounds silently carries old
+   (poisoned) data** — BuildKit cache mounts are keyed by id, not Dockerfile,
+   so a past experiment's archive can corrupt a future build. Always version
+   the id (and clear it when the recipe changes meaningfully).
+2. **The smoke suite's proxy checks fail under concurrent-build load** (its
+   `curl --retry 6 --retry-delay 1` health gate is too tight): three
+   "proxy FAIL" runs were all concurrent with heavy `docker build`/save jobs;
+   the same image passed in isolation and a manual proxy GET returned 200 in
+   14 ms. Not a size/toolchain regression — a test-harness flake under load.
+3. **tar-based state persists best as a single archive**: find → tar from
+   inside /build keeps entries relative; absolute paths (round-2 attempt 1)
+   are what broke restore.
+4. Re-checked: dev junk (test-support packages pulling vitest/tsx, typert's
+   typescript) lives in the prod tree and would prune a few more MB, but **we
+   did not hand-prune deps** — round-1 rule (don't ship unproven wins) applies;
+   it is unnecessary for the 250 MB goal (211 MiB leaves ~34 MiB headroom to
+   the 250 MiB line / ~29 MB to the 250 MB decimal line).
