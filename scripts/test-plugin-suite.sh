@@ -120,14 +120,12 @@ if [ "${SKIP_WEB:-0}" != "1" ]; then
   PORT=3084
   docker run -d --name dsh-tp-web \
     -p "$PORT:3080" \
-    -e DSH_WEB_PROXY=1 -e DSH_WEB_BIND=0.0.0.0 -e DSH_WEB_PORT=3080 \
-    -e DSH_WEB_NO_OPEN=1 -e DSH_WEB_TRUSTED_HOSTS=pluginweb.example \
-    -e DSH_APP_PORT=3081 \
+    -e DSH_WEB_NO_OPEN=1 \
     -v "$VOL:/home/dsh/.dsh" -v "$VOLWS:/workspace" \
     "$IMAGE" web >/dev/null 2>&1
   code=000
   for i in $(seq 1 60); do
-    code=$(curl -s -o /dev/null -m 2 -w "%{http_code}" -H "Host: pluginweb.example" "http://127.0.0.1:$PORT/" || true)
+    code=$(curl -s -o /dev/null -m 2 -w "%{http_code}" "http://127.0.0.1:$PORT/" || true)
     [ "$code" = "200" ] && break
     sleep 1
   done

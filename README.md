@@ -1,112 +1,343 @@
-# DeepSeek Harness — container
+# DeepSeek Harness in Docker
 
-Runs the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web
-GUI (`dsh web`) as a prepackaged, hardened Docker image. The image is compiled
-from the harness source at build time and keeps only the production runtime —
-you deploy it, you don't build it. The image is published to GHCR as
-[`ghcr.io/andreasseidl/dsh-docker`](https://github.com/AndreasSeidl/dsh-docker/pkgs/container/dsh-docker).
+Run the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness)
+coding-agent GUI with one command. No build, no Node.js, no `pnpm` — just
+Docker and a browser.
 
-## What you get
+```sh
+docker run -d --name dsh -p 127.0.0.1:3080:3080 \
+  -v dsh-home:/home/dsh/.dsh \
+  -v dsh-workspace:/workspace \
+  ghcr.io/andreasseidl/dsh-docker:latest
+```
 
-| | |
+Then read the access URL from the log and open it exactly as printed — the GUI
+is session-locked and the address carries a one-time token (see
+[First run](#first-run--the-session-locked-url)). Add your API key on the
+Settings page and you're in.
+
+> Out of the box only **this machine** can use the GUI. One variable opens it
+> to the rest of your network — there is no login screen yet, so see
+> [Network access](#network-access) first.
+
+---
+
+## First run — the session-locked URL
+
+The harness locks the GUI behind a per-run session token (only someone who can
+read the container log can get in). On every boot the proxy prints a ready line
+starting with `dsh web:` in the log that carries that token:
+
+```sh
+docker logs dsh | grep 'dsh web:'
+# dsh web: http://localhost:3080/?token=OQMr0P5kk46m1tw8S3g8FTj4io0fso8Cn9UaIEXA
+```
+
+Open **that exact URL**. Your browser trades the token for a session cookie
+(valid up to 30 days), so afterwards plain <http://localhost:3080> works too —
+until the container is recreated, at which point the token changes and you pick
+the new `dsh web:` URL from the log again. Requesting a URL without a valid
+token or cookie gets a `401 … reopen the URL printed by dsh web` message.
+
+With Compose the same line is in `docker compose logs dsh`. Set
+`-e DSH_WEB_PORT=<port>` (or `DSH_WEB_PORT` in your `.env`) to match the host
+port you publish, so the printed URL points at the right place.
+
+---
+
+## Quick start
+
+### Option A — `docker run`
+
+```sh
+docker run -d --name dsh -p 127.0.0.1:3080:3080 \
+  -e DEEPSEEK_API_KEY=sk-... \
+  -e DSH_WEB_PORT=3080 \
+  -v dsh-home:/home/dsh/.dsh \
+  -v dsh-workspace:/workspace \
+  ghcr.io/andreasseidl/dsh-docker:latest
+```
+
+Then open the tokenized access URL from the log —
+`docker logs dsh | grep 'dsh web:'` — see [First run](#first-run--the-session-locked-url).
+The `DEEPSEEK_API_KEY` line is optional — you can enter the key in the GUI
+instead, and the `DSH_WEB_PORT` line just tells the container which host port
+you chose so the printed URL is right (default 3080).
+
+The GUI is served on **3080** inside the container — the same port the
+harness's own documentation uses, so anything written for upstream applies here
+unchanged. Map it wherever you like on the host: `-p 127.0.0.1:9000:3080` puts
+it on <http://localhost:9000> (and pass `-e DSH_WEB_PORT=9000` so the printed
+access URL points at <http://localhost:9000>).
+
+The `127.0.0.1:` prefix is what keeps the GUI to this machine; drop it
+(`-p 3080:3080`) to open it to your network, and read
+[Network access](#network-access) first.
+
+### Option B — Docker Compose (recommended)
+
+In an empty folder:
+
+```sh
+curl -O https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/docker-compose.yml
+curl -O https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/.env.example
+cp .env.example .env        # optional — put your API key in it
+docker compose up -d
+```
+
+Open the access URL from the log — `docker compose logs dsh | grep 'dsh web:'`
+(see [First run](#first-run--the-session-locked-url)). Compose gives you
+restart-on-reboot, a hardened sandbox (read-only root filesystem, no
+capabilities, no privilege escalation), and every setting in one `.env` file.
+
+Stop with `docker compose down` — your data is kept. `docker compose down -v`
+deletes the volumes and everything on them.
+
+---
+
+## Work on your own code
+
+By default the agent works in a private Docker volume. To point it at a real
+project, mount that folder as the workspace:
+
+```sh
+docker run -d --name dsh -p 127.0.0.1:3080:3080 \
+  -v dsh-home:/home/dsh/.dsh \
+  -v "$PWD":/workspace \
+  ghcr.io/andreasseidl/dsh-docker:latest
+```
+
+With Compose, set it in `.env`:
+
+```sh
+DSH_WORKSPACE_DIR=./my-project
+```
+
+The agent can only see what you mount — the rest of your machine is invisible
+to it.
+
+**If the agent can read your files but cannot save changes**, the folder
+belongs to a different user than the one inside the container (uid `999`). The
+container tells you so at startup with the exact command to run; it is:
+
+```sh
+sudo chown -R 999:999 ./my-project     # give the container user ownership
+# or, if you would rather not change owners:
+chmod -R a+rwX ./my-project
+```
+
+(On macOS and Windows with Docker Desktop this does not come up — file sharing
+already maps ownership for you.)
+
+---
+
+## Settings you might actually change
+
+All of these are environment variables. With Compose, put them in `.env`
+(copy [.env.example](.env.example)); with `docker run`, pass them as `-e NAME=value`.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | — | Your provider key. Optional — you can enter it in the GUI instead. |
+| `DEEPSEEK_BASE_URL` | — | Point at a compatible endpoint instead of api.deepseek.com. |
+| `DSH_WEB_PORT` | `3080` | The port on **your** machine — it is what the startup banner prints. With Compose it also sets the `-p` mapping. With `docker run` you choose it in `-p <port>:3080`; add `-e DSH_WEB_PORT=<port>` so the banner matches. |
+| `DSH_BIND_ADDRESS` | `127.0.0.1` | *(Compose only)* The address the GUI is published on. The default means this machine only; **set it to `0.0.0.0` for LAN access**. |
+| `DSH_WORKSPACE_DIR` | volume | *(Compose only)* Host folder the agent works in, e.g. `./my-project`. |
+| `DSH_TAG` | `latest` | *(Compose only)* Image version: `latest`, `nightly`, or a pinned release. |
+| `DSH_TELEMETRY_DISABLED` | — | Any non-empty value opts out of harness telemetry. |
+| `DSH_QUIET` | — | Silences the container's startup banner. |
+
+Changing which port you open takes one variable:
+
+```sh
+DSH_WEB_PORT=9000 docker compose up -d      # → http://localhost:9000
+```
+
+Everything else the harness understands (provider keys, `HTTP_PROXY`, `TZ`,
+`NODE_OPTIONS`, …) passes straight through as a normal environment variable.
+See [all variables](#all-environment-variables) for the complete list.
+
+---
+
+## Everyday commands
+
+| I want to… | Command |
 |---|---|
-| Behavior | Identical to `pnpm dsh web`: serves the GUI on `http://127.0.0.1:3080`, uses `$DSH_HOME` (= `~/.dsh`) for all harness data, and reads model config from `settings.yaml` / credentials on your volume. |
-| Network | Reachable over LAN/IP out of the box via a bundled reverse proxy (loopback-only in faithful mode); see [Network access](#network-access--the-reverse-proxy). |
-| Hardened | Runs as an unprivileged `dsh` user under `tini` (PID 1); the compose profile adds `read_only` rootfs, no capabilities, no privilege escalation, and a pid cap. |
-| Config | Everything the harness exposes is reachable through environment variables or `settings.yaml` on the volume — see [Configuration](#configuration). |
-| Plugins | `dsh plugin` (pnpm forwarder) works; the runtime carries pnpm + a C/native toolchain so native plugins compile. |
-| Size | ~303 MiB transferred-compressed; see [Size](#size) for measured numbers. |
+| see what it's doing | `docker logs -f dsh` |
+| get the access URL (session token) | `docker logs dsh \| grep 'dsh web:'` |
+| stop it (keeping data) | `docker stop dsh` / `docker compose down` |
+| start it again | `docker start dsh` / `docker compose up -d` |
+| update to the newest image | `docker compose pull && docker compose up -d` |
+| get a shell inside | `docker exec -it dsh bash` |
+| install a plugin | `docker exec -it dsh dsh plugin --profile web add <package>` |
+| run a one-shot task | `docker exec -it dsh dsh --profile headless "run the tests"` |
+| see container usage help | `docker run --rm ghcr.io/andreasseidl/dsh-docker:latest container-help` |
+| back up my data | `docker run --rm -v dsh-home:/data -v "$PWD":/out alpine tar czf /out/dsh-backup.tgz -C /data .` |
+| start completely fresh | `docker compose down -v` (⚠️ deletes settings, history, and workspace) |
 
-## Deploy
+---
 
-The image is on GHCR — there is no build step. Both examples below create the
-same two volumes (`dsh-home` for harness data, `dsh-workspace` for the agent's
-work) automatically on first run.
+## Troubleshooting
 
-### Docker Compose (recommended)
+**Port 3080 is already in use.** Pick another host port: `DSH_WEB_PORT=9000
+docker compose up -d`, or `-p 9000:3080` with `docker run`.
+
+**The agent can't save files.** See
+[Work on your own code](#work-on-your-own-code) — it's a folder-ownership
+mismatch, and the startup banner prints the exact fix.
+
+**"No model credentials found yet."** Set `DEEPSEEK_API_KEY`, or open the GUI's
+Settings page and enter your key there — it is saved on the `dsh-home` volume
+and reused on every restart.
+
+**My settings/history disappeared.** You ran without the `dsh-home` volume. The
+startup banner warns about this; add `-v dsh-home:/home/dsh/.dsh`.
+
+**Connection refused from another machine.** That's the default: the port is
+published on `127.0.0.1` only. See [Network access](#network-access) to open it
+up — and read the warning there first.
+
+**Check the container's own view of things:** `docker logs dsh` — the startup
+banner reports the URL (using `DSH_WEB_PORT`), both data locations, whether they
+are persistent, and whether credentials are configured.
+
+---
+
+## Network access
+
+**By default nothing on your network can reach the GUI.** The port is published
+on `127.0.0.1`, so the kernel only ever accepts connections from the machine
+running Docker — a browser anywhere else doesn't get refused, it doesn't get a
+connection at all.
+
+**For LAN access, set `DSH_BIND_ADDRESS` to `0.0.0.0`** — that is the only
+value that opens it up, and it is a literal address, not an on/off flag:
 
 ```sh
-docker compose up -d          # pulls the published image and runs the hardened stack
-open http://127.0.0.1:3080
+DSH_BIND_ADDRESS=0.0.0.0 docker compose up -d
 ```
 
-The [docker-compose.yml](docker-compose.yml) ships the hardened profile: reverse
-proxy enabled, both volumes declared, read-only rootfs, dropped capabilities.
-Stop with `docker compose down` (keeps your data) or `docker compose down -v`
-(removes the volumes too).
-
-### `docker run`
+Or put `DSH_BIND_ADDRESS=0.0.0.0` in your `.env`. With `docker run` there is no
+variable — the same thing is done by dropping the `127.0.0.1:` prefix from the
+port mapping:
 
 ```sh
-# Minimal — loopback only, exactly `pnpm dsh web`:
-docker run -d --name dsh \
-  -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace \
-  ghcr.io/andreasseidl/dsh-docker:latest
-
-# Network reachable (LAN/IP) — loopback app + bundled reverse proxy:
-docker run -d --name dsh -p 3080:3080 \
-  -e DSH_WEB_PROXY=1 -e DSH_WEB_BIND=0.0.0.0 -e DSH_WEB_PORT=3080 \
-  -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace \
-  ghcr.io/andreasseidl/dsh-docker:latest
-
-open http://127.0.0.1:3080
+docker run -p 3080:3080 ...        # instead of -p 127.0.0.1:3080:3080
 ```
 
-Stop with `docker stop dsh && docker rm dsh` (the named volumes survive
-removal, so your data is kept).
+There is **no user-facing login** — the only gate is a per-boot session token.
+The harness prints a tokenized ready URL (`dsh web: …?token=…`) in the
+container log, and requests without that token or its cookie get a `401`. The
+token and the cookie it trades for are effectively a single shared secret
+readable from the host (`docker logs dsh`): anyone who obtains it can use the
+agent, read your workspace, and run commands in the container. Only expose the
+port on a network you trust, and treat the token like a password for that
+container.
 
-### Picking a tag
+**The session token works identically over LAN** — nothing about it is bound to
+a host name or IP. The proxy always presents the fixed loopback authority to
+the app (whatever `Host` a client sends is rewritten to `127.0.0.1:30800`), so
+the token exchange and the resulting cookie validate from any machine that can
+reach the published port:
 
-- **`:latest`** — the latest released version (what you want to try it out).
-- **`:<version>`** — a pinned release, e.g. `0.1.1-rc.2` (pin this in
-  production / for reproducibility).
-- **`:nightly`** — a weekly rebuild of the harness's default branch, "latest
-  source" rolling.
+- On the Docker host, the printed `dsh web:` URL is clickable as-is. A LAN
+  client has to replace `localhost` with the host machine's address, e.g.
+  <http://192.168.1.5:3080/?token=…> (the token is a query string, so the
+  substitution is all that changes).
+- The cookie lasts up to 30 days and is not tied to the machine that first
+  exchanged it — anyone who gets the token or extracts the cookie can access
+  from anywhere the port is reachable, until the container is recreated.
+- The cookie carries **no `Secure` flag** and plain-HTTP LAN transmits it in
+  cleartext, so someone sniffing the LAN can capture and reuse a session. Put
+  TLS in front for anything beyond a trusted home/office network.
 
-Compose also honors a pinned tag: `DSH_TAG=0.1.1-rc.2 docker compose up -d`.
+In particular there is still **no Host-header allow-list**: any client can claim
+any `Host` header, so such a check adds no real protection. The publish address
+is what keeps the port private, and the log token — not the `Host` header — is
+what gates access once it is published.
 
-### First boot
+**Why an address and not `DSH_LAN=1`?** Compose can only test whether a
+variable is *set*, never what it holds. An on/off switch would therefore have
+to treat "unset" as "publish on every interface" — making the wide-open state
+the default for anyone who downloads the compose file and runs it. An address
+lets "unset" mean `127.0.0.1`, so the safe state is the one you get by doing
+nothing. `DSH_BIND_ADDRESS=1` stops at startup with `invalid IP address: 1`;
+the two values you want are `127.0.0.1` and `0.0.0.0`.
 
-On first boot the image **seeds** the `$DSH_HOME` volume with a scaffold
-`settings.yaml` (empty, so stock defaults apply) and `AGENTS.md` (the harness's
-user-global briefing the agent loads before every session), then
-auto-initializes the `web` profile and prints
-`dsh web: http://127.0.0.1:3080`. Existing files are never overwritten.
+<details>
+<summary><b>How it works — the bundled reverse proxy</b></summary>
 
-## Volumes & data
+The harness deliberately **refuses to bind `dsh web` to `0.0.0.0`** (its `/api`
+trust fence assumes loopback or explicitly trusted authorities), and its
+frontend calls `crypto.randomUUID()`, which browsers only expose in *secure
+contexts* (https or localhost). A plain-HTTP LAN deployment therefore needs two
+fixes, both of which this image supplies without forking the harness:
 
-> **Why a volume is mandatory**
-> The harness *is* self-modifying by design. `$DSH_HOME` holds its profile
-> directory (`profiles/web/...`), the user's own patch layer
-> (`profiles/web/cordis.patch.yml`, hot-reloaded live), session history,
-> `settings.yaml`, `.credentials.yaml`, and your user agent presets. In a
-> container that directory must live on a **volume** or everything you do is
-> lost the moment the container stops.
+- **[`container/scripts/reverse-proxy.mjs`](container/scripts/reverse-proxy.mjs)**
+  (zero dependencies) listens on `3080` and forwards to the loopback-only app on
+  `30800`, rewriting `Host` and `Origin` to loopback so the `/api` fence sees a
+  local request and the browser sees one same-origin page. WebSocket upgrades
+  (`/api/events.*`) are transported the same way.
+- A tiny `crypto.randomUUID` polyfill is injected into the served `index.html`
+  at image build time (container-only; the harness source is untouched).
 
-The container uses two mounted paths, both backed by named volumes by default:
+The proxy is deliberately **not** an auth layer — it is the documented place to
+add one. It is always in front of the app, so `dsh web` itself always runs
+untouched on its own loopback-only port.
+
+</details>
+
+---
+
+## Reference
+
+<details>
+<summary><b>All environment variables</b></summary>
+
+### Web server
+
+| Variable | Default | Maps to | Notes |
+|---|---|---|---|
+| `DSH_WEB_PORT` | `3080` | banner/display only | The host port you publish the GUI on, used by the startup banner. Inside the container the GUI is always on `3080`. |
+| `DSH_WEB_NO_OPEN` | `1` | `dsh web --no-open` | Containers have no browser; set `0` to allow the browser-handoff path. |
+| `DSH_WEB_ARGS` | — | raw extra args | Must start with `-`; passed through to `dsh web` for exotic flags. |
+| `DSH_WORKSPACE` | `/workspace` | process cwd (default workspace) | The in-container path; back it with a volume. |
+| `DSH_HOME` | `/home/dsh/.dsh` | harness home | Point at a directory inside your volume if you prefer a dedicated layout. |
+| `DSH_QUIET` | — | container banner | Non-empty silences the startup summary. |
+
+The two in-container ports are **fixed and not configurable**: the proxy serves
+the GUI on `3080` (the port upstream documents, so every `localhost:3080` in the
+harness's docs works as written), and `dsh web` itself
+runs behind it on `127.0.0.1:30800` — high enough to stay clear of the dev
+servers the agent starts inside the container, and below the ephemeral range.
+The only port worth choosing is the host one you publish. `localhost`,
+`127.0.0.1` and any `127.x` Host header are trusted by the `/api` fence
+automatically.
+
+### Harness & providers (pass straight through)
+
+- `DSH_TELEMETRY_DISABLED` — opt out of telemetry (any non-empty value).
+- `DSH_TOOLS_MODE` — `native` / `code` / `both` tool presentation.
+- `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` — the shipped DeepSeek adapter
+  (credentials can equally live in `.credentials.yaml` on the volume).
+- Any pi-ai provider keys referenced from `settings.yaml` (e.g. `DGX_API_KEY`).
+- `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`, `TZ`, `NODE_OPTIONS`, and every
+  other variable the layered `.env` loader forwards.
+
+</details>
+
+<details>
+<summary><b>Volumes &amp; what is stored where</b></summary>
+
+The container uses two mounted paths. **Both matter**: the harness is
+self-modifying by design, and without volumes everything you do is lost the
+moment the container is removed. The startup banner warns you when one is
+missing.
 
 | Path in container | What it is | Back it with |
 |---|---|---|
 | `/home/dsh/.dsh` | the harness home (`$DSH_HOME`): **all** persistent harness data | a named volume (`dsh-home`) or a host directory |
 | `/workspace` | the agent's **workspace** — the directory it reads and edits files in | a named volume (`dsh-workspace`) or a host bind mount of real code |
-
-The agent's work is equally ephemeral without a workspace volume — mount one or
-the model can't persist any file it creates. To work on real code instead of a
-private volume, bind-mount a project directory:
-
-```sh
-# agent works on the code at ./my-project (and only there):
-docker run -d -p 3080:3080 \
-  -e DSH_WEB_PROXY=1 -e DSH_WEB_BIND=0.0.0.0 \
-  -v dsh-home:/home/dsh/.dsh \
-  -v "$PWD/my-project":/workspace \
-  ghcr.io/andreasseidl/dsh-docker:latest
-```
-
-With compose, edit [docker-compose.yml](docker-compose.yml) to bind `./workspace`
-(or another host dir) instead of the `dsh-workspace` volume.
-
-What survives a restart lives under `$DSH_HOME`:
 
 ```
 /home/dsh/.dsh/
@@ -116,245 +347,159 @@ What survives a restart lives under `$DSH_HOME`:
 ├── .pnpm-store/         # pnpm content store for `dsh plugin add` (persists installs)
 ├── settings.yaml        # seeded on first boot; model selection, UI preferences
 ├── AGENTS.md            # seeded on first boot; your user-global instruction file
-├── .credentials.yaml    # provider credentials (git-ignored upstream)
+├── .credentials.yaml    # provider credentials
 ├── sessions/            # conversation history
 ├── storages/            # persisted storage domains
 └── .agent-presets/      # agent presets you author
 ```
 
-Relocate either path with `DSH_HOME` / `DSH_WORKSPACE`. If you mount a **host
-directory** instead of a named volume, pick the directory explicitly
-(`-v ./my-dsh:/home/dsh/.dsh`); a named volume is otherwise the most convenient.
+On first boot the image seeds an empty `$DSH_HOME` with a scaffold
+`settings.yaml` (empty, so stock defaults apply) and `AGENTS.md` (the
+user-global briefing the agent loads before every session), then
+auto-initializes the `web` profile. Existing files are never overwritten.
 
-> Inside the container the `dsh` user owns `/workspace`, `/home/dsh`, and the
-> install at `/app`. Everything else (including the host filesystem) is
-> reachable only through volumes you mount, so the agent can never touch host
-> files outside the workspace and harness-home volumes. With the hardened
-> compose profile the root filesystem is additionally read-only.
+Inside the container the `dsh` user owns `/workspace`, `/home/dsh`, and the
+install at `/app`. Everything else is reachable only through volumes you mount,
+so the agent can never touch host files outside them. With Compose the root
+filesystem is additionally read-only.
 
-## Configuration
+</details>
 
-Nothing is compiled into the image beyond the stock `dsh web` defaults. Every
-harness knob reaches the process through environment variables — the harness
-reads them from its own layered environment, and
-`/usr/local/bin/docker-entrypoint.sh` maps the web-facing ones onto
-`dsh web`'s flags. Model selection, UI preferences, and provider settings can
-equally live in `settings.yaml` / `.credentials.yaml` on the volume.
+<details>
+<summary><b>Picking a tag</b></summary>
 
-### Web server
-
-| Variable | Default | Maps to | Notes |
-|---|---|---|---|
-| `DSH_WEB_PROXY` | unset | proxies `web` | Non-empty turns on the bundled reverse proxy (loopback app + public proxy). Set it for any deployment reached beyond the host. |
-| `DSH_WEB_PORT` | `3080` | public port (`--port` / proxy listen) | Both modes honor it; the healthcheck curls it. |
-| `DSH_APP_PORT` | `3081` | app listen port (proxy mode) | Loopback port the web app binds in proxy mode. |
-| `DSH_WEB_BIND` | `127.0.0.1` | webserver `host` via `--patch` (faithful) / proxy bind (proxy mode) | In faithful mode this is the harness listener (the CLI rejects `--host 0.0.0.0`, so the entrypoint uses a `--patch` overlay). In proxy mode it is the *proxy's* public bind and defaults to `0.0.0.0`. |
-| `DSH_WEB_TRUSTED_HOSTS` | — | `--trusted-host` ×N (faithful) / proxy Host allow-list (proxy) | Space/comma-separated authorities: `dsh.example.com`, `192.168.1.50`, or `host:port`. |
-| `DSH_WEB_NO_OPEN` | `1` | `dsh web --no-open` | Containers have no browser; set `0` to allow the browser-handoff path. Works on every host OS — the flag never spawns a platform launcher. |
-| `DSH_WEB_ARGS` | — | raw extra args | Must start with `-`; for exotic flags. |
-| `DSH_WORKSPACE` | `/workspace` | sets the process cwd (default workspace) | Back it with a volume; the agent works in this directory. |
-| `DSH_HOME` | `/home/dsh/.dsh` | harness home | Point at a directory inside your volume if you prefer a dedicated layout. |
-
-`localhost`, `127.0.0.1` and any `127.x` Host header are trusted by the `/api`
-fence automatically, so loopback-only use needs none of the above.
-
-**Port overrides end-to-end.** If `3080` is taken, choose another port once and
-compose publishes it on the host and the container listens on the same value:
+- **`:latest`** — the latest release. What you want to try it out.
+- **`:<version>`** — a pinned release, e.g. `0.1.1-rc.2`. Pin this in production.
+- **`:nightly`** — a weekly rebuild of the harness's default branch.
 
 ```sh
-DSH_WEB_PORT=3081 docker compose up -d    # → http://127.0.0.1:3081
+DSH_TAG=0.1.1-rc.2 docker compose up -d
 ```
 
-### Harness & providers (pass straight through)
+</details>
 
-Set these like any container env var (compose: under `environment:` or in a
-`.env` file) — no image changes needed:
+<details>
+<summary><b>Plugins</b></summary>
 
-- `DSH_TELEMETRY_DISABLED` — opt out of telemetry (`any non-empty value disables`).
-- `DSH_TOOLS_MODE` — `native` / `code` / `both` tool presentation.
-- `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` — the shipped DeepSeek adapter
-  (credentials can equally go in `.credentials.yaml` on the volume).
-- Any pi-ai provider keys referenced from `settings.yaml` (e.g. `DGX_API_KEY`).
-- `HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY`, `TZ`, `NODE_OPTIONS`, and every
-  other variable the layered `.env` loader forwards.
-
-> The default listener is loopback-only (`127.0.0.1`), matching `pnpm dsh web`.
-> Use `DSH_WEB_PROXY=1` (recommended — it is on by default in `make run` and
-> docker-compose.yml) for network reach, no extra config; or faithful mode with
-> `DSH_WEB_BIND=0.0.0.0` **and** `DSH_WEB_TRUSTED_HOSTS=<the name users type>`.
-
-## For power users
-
-### Network access & the reverse proxy
-
-The harness **refuses to bind `dsh web` to `0.0.0.0`** (safety: its `/api`
-trust fence is built around loopback / explicitly trusted authorities) and its
-frontend calls `crypto.randomUUID()`, which browsers only expose in *secure
-contexts* (https/localhost) — so a plain-HTTP LAN/IP deployment needs two fixes.
-
-The bundled proxy (in `container/scripts/reverse-proxy.mjs`, zero
-dependencies) solves both without changing the harness:
-
-- listens on `DSH_WEB_BIND:DSH_WEB_PORT` (**0.0.0.0:3080** in network mode) and
-  forwards to the loopback-only app on `DSH_APP_PORT` (**3081**);
-- rewrites `Host` and `Origin` to the loopback app as it forwards, so the
-  `/api` fence sees a local request and the browser sees one same-origin page
-  (the harness sends no CORS headers, so nothing else is needed);
-- transports **WebSocket upgrades** (`/api/events.*` realtime) the same way;
-- injects nothing — a tiny `crypto.randomUUID` polyfill is baked into the
-  served `index.html` at image build (container-only, not a fork).
-
-**It is deliberately NOT an auth layer.** When authentication is wanted later,
-the proxy is the insertion point: decide allow/deny before forwarding (Basic
-Auth, session, or put a Caddy/nginx in front on the host). Meanwhile the safer
-deployments set `DSH_WEB_TRUSTED_HOSTS` to the authority users reach you by —
-in proxy mode that becomes a **Host allow-list enforced by the proxy** (any
-other `Host` gets `403`), restoring a DNS-rebinding fence in front of the app:
+`dsh plugin` is a thin pnpm forwarder. The image is set up so installs work
+with no extra steps: pnpm is bundled with `dangerouslyAllowAllBuilds: true`
+(so postinstall hooks and `node-gyp` compiles run unattended), a C/native
+toolchain (`gcc`, `g++`, `make`, `python3`, `pkg-config`) is in the runtime, and
+pnpm's content store lives on the `$DSH_HOME` volume so installs are fast and
+survive container recreation.
 
 ```sh
-docker run -d -p 3080:3080 \
-  -e DSH_WEB_PROXY=1 -e DSH_WEB_BIND=0.0.0.0 \
-  -e DSH_WEB_TRUSTED_HOSTS=dsh.example.com \
-  -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace \
-  ghcr.io/andreasseidl/dsh-docker:latest
-```
-
-### Plugin installs
-
-`dsh plugin` is a thin pnpm forwarder (`dsh plugin --profile <name> add <pkg>`).
-The image is set up so installs work with no extra steps:
-
-- **pnpm is bundled** (required by `dsh plugin` and the `dshmarket` community
-  market) and its global config bakes in `dangerouslyAllowAllBuilds: true` —
-  dependency build scripts (prebuilt downloads and `node-gyp` compiles) run
-  without interactive approval;
-- a **C/native toolchain** (`gcc`, `g++`, `make`, `python3`, `pkg-config`)
-  is in the runtime so plugins that compile native addons build even when no
-  prebuilt binary matches;
-- pnpm's **content store lives on the `$DSH_HOME` volume** (`.pnpm-store`), so
-  installs are fast and survive container recreation.
-
-```sh
-# on the host:
-docker run --rm -it \
-  -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace \
-  ghcr.io/andreasseidl/dsh-docker:latest plugin --profile web add dshmarket
-# or from inside the container (dsh is on PATH):
 docker exec -it dsh dsh plugin --profile web add <package>
 ```
 
-Installed plugins persist on `$DSH_HOME` and, once the profile reloads, appear
-in the web UI's plugin list.
+Installed plugins persist on `$DSH_HOME` and appear in the web UI's plugin list
+once the profile reloads.
 
-Note the profile's bundle registry: the harness treats *server* plugins (packages
-that declare a `dsh.bundle` manifest field) as profile layers and registers
-them into `dsh.profile.bundles` automatically. A package that only declares
-`dsh.bundle` when it is ready (e.g. some pre-1.0 community RCs) is installed
-as a plain profile dependency — the CLI even prints
-`declares no dsh.bundle — installed as a plain dependency, not a profile layer`
-for those. To make a plain dependency load as a bundle, add its package name to
-`dsh.profile.bundles` in `$DSH_HOME/profiles/web/package.json` (a manual step,
-not something a pnpm forwarder can do for you).
+Note the profile's bundle registry: the harness treats *server* plugins
+(packages that declare a `dsh.bundle` manifest field) as profile layers and
+registers them into `dsh.profile.bundles` automatically. A package that doesn't
+declare `dsh.bundle` is installed as a plain profile dependency — the CLI even
+prints `declares no dsh.bundle — installed as a plain dependency, not a profile
+layer`. To make such a dependency load as a bundle, add its package name to
+`dsh.profile.bundles` in `$DSH_HOME/profiles/web/package.json`.
 
-### Other `dsh` modes
+</details>
 
-The container is a full `dsh` launcher, so every CLI mode works. Each example
-mounts both the harness-home and the workspace volumes:
+<details>
+<summary><b>Other <code>dsh</code> modes</b></summary>
 
-| Command | Container |
+The container is a full `dsh` launcher: the first argument selects the mode,
+and anything that isn't a container convenience mode is passed straight to the
+CLI.
+
+| Mode | Command |
 |---|---|
-| Web GUI | default (`web`, faithful loopback) |
-| One-shot task | `docker run --rm -it -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace ghcr.io/andreasseidl/dsh-docker:latest --profile headless "run the tests"` |
-| Inspect the composed profile | `docker run --rm -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace ghcr.io/andreasseidl/dsh-docker:latest --profile web --dump-default-config` |
-| Install a plugin into a profile | `docker run --rm -it -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace ghcr.io/andreasseidl/dsh-docker:latest plugin --profile web add <package>` |
+| Web GUI (default) | `docker run ... IMAGE` |
+| Interactive shell | `docker run --rm -it ... IMAGE shell` |
+| Container usage help | `docker run --rm IMAGE container-help` |
+| One-shot task | `docker run --rm -it ... IMAGE --profile headless "run the tests"` |
+| Inspect the composed profile | `docker run --rm ... IMAGE --profile web --dump-default-config` |
+| Install a plugin | `docker run --rm -it ... IMAGE plugin --profile web add <package>` |
 | Edit your patch layer | edit `profiles/web/cordis.patch.yml` on the volume — it hot-reloads |
+
+(`...` = the two `-v` volume flags; the web row also wants
+`-p 127.0.0.1:3080:3080`.)
 
 The default agent preset is `standard`; its codex/claude delegation tool rows
 are mounted but their CLI binaries are **not** shipped by default (that saves
-~560 MB — `/openai/codex` & `claude-agent-sdk` platform packages are only
-resolved when the model actually invokes `subagent_codex`/`subagent_claude_code`).
+~560 MB — they are only resolved when the model actually invokes
+`subagent_codex` / `subagent_claude_code`).
 
-### Building your own image from source
+</details>
 
-You normally don't need this — the published image is the supported way to run
-it. If you want to build from a harness checkout (e.g. to test an unreleased
-version or with different binaries bundled):
+<details>
+<summary><b>Image size</b></summary>
 
-```sh
-# Build from a deepseek-harness checkout, then run or publish:
-make build DSH_SRC=/path/to/deepseek-harness          # dsh:dev
-make build TAG=0.1.0                                  # dsh:0.1.0
-make publish TAG=0.1.0 REGISTRY=ghcr.io/you           # docker push ghcr.io/you/dsh:0.1.0
-docker run --rm -it -v dsh-home:/home/dsh/.dsh ghcr.io/you/dsh:0.1.0 --profile headless "run the tests"
+Measured for the default build (no agent CLIs), `linux/amd64`, as the gzip'd
+`docker save` payload:
 
-# bundle the codex/claude CLI binaries (+~560 MB) so subagent_delegation rows resolve:
-make build TAG=edge INCLUDE_AGENT_CLIS=1
-# or drop the C/native toolchain for a leaner image (plugin installs needing a compiler fail):
-make build INCLUDE_BUILD_TOOLS=0
-```
-
-`make publish`/`make push` just runs `docker push` — log in with
-`docker login` first. The tag name is passed through verbatim, so
-`REGISTRY=ghcr.io/you IMAGE=dsh TAG=v1` → `ghcr.io/you/dsh:v1`.
-
-## Size
-
-Measured for the default build (no agent CLIs), `linux/amd64`, as the
-gzip'd `docker save` payload (the "compressed" size you actually transfer):
-
-- **Default: ~1.5 GB uncompressed / ~298 MiB (~312 MB) compressed** — the
-  C/native toolchain (gcc g++ make python3 pkg-config) is baked in so
-  `dsh plugin add` can compile native addons at runtime when no prebuilt
-  binary matches (the default; see the C-toolchain note below). The runtime
-  image drops `*.map` sourcemaps — the largest build-time-only artifact
-  (~20 MB; used only for in-image source-mapped debugging, which the runtime
-  never consumes and which leaves stack-trace text unchanged) — while keeping
-  the original package `src/**` TypeScript as readable in-image
-  reference/audit trail.
-- `make build INCLUDE_BUILD_TOOLS=0` drops the compiler/python3 set for a
-  leaner **~1.1 GB uncompressed / ~211 MiB (~221 MB)** image; plugin installs
-  that need a compiler will then fail.
+- **Default: ~1.5 GB uncompressed / ~298 MiB compressed.** Includes the
+  C/native toolchain so `dsh plugin add` can compile native addons at runtime.
+  Sourcemaps (`*.map`, ~20 MB) are dropped; the packages' `src/**` TypeScript is
+  kept as an in-image reference/audit trail.
+- `make build INCLUDE_BUILD_TOOLS=0` drops the compiler set for a leaner
+  **~1.1 GB uncompressed / ~211 MiB compressed** image; plugin installs that
+  need a compiler will then fail.
 
 The toolchain is kept by default because "plugin installs work for anything"
-beats ~100 MB of compressed size; the harness's own native addons (node-pty,
-sharp, koffi) are compiled once at image build and need no toolchain at
-runtime, but third-party plugins with no prebuilt native binary do.
+beats ~100 MB of compressed size.
 
-## Notes / limitations
+</details>
 
-- **Auth**: there is none yet, by design. Expose beyond a trusted network only
-  with the `DSH_WEB_TRUSTED_HOSTS` allow-list set, TLS, or the future auth
-  layer in the proxy.
+<details>
+<summary><b>Known limitations</b></summary>
+
+- **Auth**: a per-boot session token printed in the container log is the whole
+  gate — there are no user accounts. Its 30-day cookie is not bound to any
+  machine and travels in plaintext over plain-HTTP LAN, so expose beyond a
+  trusted network only with TLS in front or real auth there. There is no
+  Host-header allow-list either — any client can claim any `Host`, so one would
+  not add protection.
 - **Codex/Claude delegation** without `INCLUDE_AGENT_CLIS=1` follows the
   upstream model: the tool rows mount, and a call fails with a missing-binary
-  error (equivalent to running `dsh web` on a machine without those CLIs).
+  error (same as running `dsh web` on a machine without those CLIs).
 - **Host-bound workspaces**: a bind-mounted `/workspace` owned by a different
-  uid can make `git` warn about "dubious ownership"; run
-  `git config --global --add safe.directory /workspace` via the container shell
-  if you hit it (in hardened mode, HOME is read-only — use
-  `-c safe.directory=/workspace` instead, or the `GIT_CONFIG_*` envs).
+  uid can make `git` warn about "dubious ownership"; use
+  `git -c safe.directory=/workspace ...` (with Compose, `$HOME` is read-only, so
+  `git config --global` won't stick).
 - The macOS/Windows-only surfaces (PowerShell, native directory picker) are
-  inert on Linux; `--no-open` is host-agnostic, so the web mode behaves the
-  same on macOS/Windows Docker Desktop hosts.
+  inert on Linux; `--no-open` is host-agnostic, so web mode behaves the same on
+  Docker Desktop hosts.
 - The landlock sandbox binary is not shipped (it needs built-in kernel
-  support); the sandbox stack degrades to its environment-defined fallback as
-  it does on any unsupported host.
+  support); the sandbox stack degrades to its environment-defined fallback as it
+  does on any unsupported host.
 - Custom agent presets you author belong in `$DSH_HOME/.agent-presets/` on the
-  volume (they carry the same trust as shell access, upstream's own rule).
-- Healthcheck curls the configured `DSH_WEB_PORT` (default 3080) on loopback —
-  the proxy (when enabled) answers it.
+  volume (they carry the same trust as shell access — upstream's own rule).
 
-## For maintainers & contributors
+</details>
 
-Everything above is about **using** the container. The development and
-contribution depth lives in separate files so this page stays focused on
-deployment, setup, and use — and so tools/agents can find each topic fast:
+---
+
+## Building it yourself
+
+You normally don't need this — the published image is the supported way to run
+it. To build from a harness checkout (e.g. to test an unreleased version):
+
+```sh
+make build DSH_SRC=/path/to/deepseek-harness    # → dsh:dev
+DSH_IMAGE=dsh:dev docker compose up -d          # run your build
+```
+
+`make help` lists every target. Deeper documentation lives in separate files so
+this page stays about *using* the container:
 
 - **[DEVELOPMENT.md](DEVELOPMENT.md)** — repository layout, Makefile reference,
-  how the image is built (multi-stage build), build-speed measurements, and
-  cache hygiene.
-- **[TESTING.md](TESTING.md)** — the smoke, plugin-install, hardened-compose,
-  and plugin-suite verifiers; how to run them against your built image.
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution workflow and the CI /
-  publishing mechanics (release tags, weekly `nightly`, native multi-arch
-  builds, GHCR cache).
+  how the image is built, build-speed measurements, cache hygiene.
+- **[TESTING.md](TESTING.md)** — the smoke, plugin-install, hardened-compose and
+  plugin-suite verifiers.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — contribution workflow, CI and
+  publishing mechanics.
+
+## License
+
+[MIT](LICENSE).

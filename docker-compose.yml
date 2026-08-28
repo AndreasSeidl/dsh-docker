@@ -1,59 +1,79 @@
-# DeepSeek Harness container — convenient compose wiring.
+# DeepSeek Harness — run the web GUI with Docker.
 #
-#   docker compose up -d        # pulls the published GHCR image and runs the
-#   open http://127.0.0.1:3080  # hardened stack (volumes + reverse proxy)
+#   1. (optional) cp .env.example .env   and put your API key in it
+#   2. docker compose up -d
+#   3. open http://localhost:3080
 #
-# The image is published to GHCR; this file deploys it, so there is no build
-# step by default. Pin a specific release with DSH_TAG, e.g.
-#   DSH_TAG=0.1.1-rc.2 docker compose up -d
-# To run YOUR locally built image instead (e.g. after `make build`):
-#   DSH_IMAGE=dsh:dev docker compose up -d --no-build
+# Everything below has a working default: `docker compose up -d` alone pulls
+# the published image, creates the two volumes, and serves the GUI. Nothing in
+# this file needs editing — the settings people usually change are environment
+# variables you can put in a `.env` file next to this one (see .env.example):
 #
-# Network: the GUI is reachable on every host interface by default (set
-# DSH_WEB_PUBLISH_HOST=127.0.0.1 to restrict to the host). There is NO
-# authentication yet — the bundled reverse proxy is the documented place to add
-# one later; until then keep it on a trusted network or set
-# DSH_WEB_TRUSTED_HOSTS to the authority users reach it by (the proxy then
-# refuses any other Host with 403).
+#   DEEPSEEK_API_KEY   your provider key (or set it later in the GUI Settings)
+#   DSH_WEB_PORT       port on YOUR machine to open the GUI on   (default 3080;
+#                      also what the startup banner prints)
+#   DSH_BIND_ADDRESS   the address the GUI is published on. Default 127.0.0.1
+#                      = this machine only; set it to 0.0.0.0 for LAN access
+#   DSH_WORKSPACE_DIR  host folder the agent works in, e.g. ./my-project
+#                      (default: the private `dsh-workspace` volume)
+#   DSH_TAG            image version to run                      (default latest)
 #
-# Hardening (from the container best-practices pass): read-only rootfs with
-# only the two volumes + a tmpfs writable, no Linux capabilities, no privilege
-# escalation, and a pid cap so a runaway agent can't exhaust the host.
+# Ports: the GUI is served on 3080, the port the harness's own docs use, so
+# anything written for upstream applies here. (`dsh web` itself runs behind the
+# bundled proxy on an internal port; you never see or set it.)
 #
-# NOTE on the tmpfs: it must stay EXEC-capable. The harness's spill store
-# mkdtemp's under /tmp and dynamic bundle loading imports/extracts from there;
-# `noexec` makes first boot die with ERR_MODULE_NOT_FOUND / EROFS. We keep
-# nosuid+nodev and a size cap instead.
+# Heads-up: there is NO authentication. Out of the box the port is published on
+# 127.0.0.1, so the kernel only accepts connections from this machine — nothing
+# on your network can reach it at all. Setting DSH_BIND_ADDRESS=0.0.0.0 opens it
+# to everyone who can reach this host on that port, so do that only for a
+# network you trust.
+#
+# Stop with `docker compose down` (your data is kept) or `docker compose down -v`
+# (deletes the volumes and everything on them).
 
 services:
   dsh:
     image: ${DSH_IMAGE:-ghcr.io/andreasseidl/dsh-docker:${DSH_TAG:-latest}}
     container_name: dsh
+    restart: unless-stopped
+
+    # <publish address>:<host port>:<the GUI inside the container>.
+    # The publish address IS the access control: 127.0.0.1 (default) means the
+    # kernel never accepts a connection from anywhere but this machine.
+    #
+    # Set DSH_BIND_ADDRESS=0.0.0.0 for LAN access. It is an address, not an
+    # on/off flag — `=1` fails with "invalid IP address: 1". (It has to work
+    # this way: compose can only test whether a variable is set, not what it
+    # holds, and keying on set/unset would make "unset" mean "published on
+    # every interface" — the wrong default for a GUI with no login.)
     ports:
-      - "${DSH_WEB_PUBLISH_HOST:-0.0.0.0}:${DSH_WEB_PORT:-3080}:${DSH_WEB_PORT:-3080}"
+      - "${DSH_BIND_ADDRESS:-127.0.0.1}:${DSH_WEB_PORT:-3080}:3080"
+
     environment:
-      # Proxy mode: the web app listens loopback-only on DSH_APP_PORT (3081);
-      # the bundled reverse proxy publishes DSH_WEB_PORT on DSH_WEB_BIND,
-      # rewriting Host/Origin to loopback so the /api trust fence and the
-      # same-origin page both work over the network with no further config.
-      DSH_WEB_PROXY: "1"
-      DSH_WEB_BIND: "0.0.0.0"
+      # Your provider key. Set it in .env (or your shell) — or leave it empty
+      # and add the key on the GUI's Settings page after first boot.
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-}"
+
+      # The host port you publish on, passed through so the startup banner
+      # prints the URL you will actually use (http://localhost:DSH_WEB_PORT).
       DSH_WEB_PORT: "${DSH_WEB_PORT:-3080}"
-      # DSH_WEB_TRUSTED_HOSTS: comma/space-separated Host allow-list enforced by
-      # the proxy (403 otherwise), e.g. "dsh.example.com" or "192.168.1.50".
-      # DSH_TELEMETRY_DISABLED: "1"
-      # DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL and other provider envs pass through
-      # from your shell or .env:
-      # DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+
+      # Set DSH_TELEMETRY_DISABLED=1 in .env to opt out of harness telemetry.
+      DSH_TELEMETRY_DISABLED: "${DSH_TELEMETRY_DISABLED:-}"
+
     volumes:
-      # THE harness data lives here: profiles (with the user's own patch
-      # layer), session history, credentials, settings, and any plugins.
+      # Your harness data: settings, credentials, chat history, plugins.
       - dsh-home:/home/dsh/.dsh
-      # The agent's workspace: the directory sessions start in and where the
-      # model writes/edits files. Back it with a host bind to work on real
-      # code, e.g. `- ${PWD}:/workspace`:
-      #   - ./workspace:/workspace
-      - dsh-workspace:/workspace
+      # The agent's workspace. Defaults to a private volume; point
+      # DSH_WORKSPACE_DIR at a host folder (e.g. ./my-project) to let the agent
+      # work on real code — it can only ever see what you mount here.
+      - ${DSH_WORKSPACE_DIR:-dsh-workspace}:/workspace
+
+    # ── Hardening ───────────────────────────────────────────────────────────
+    # Read-only root filesystem: only the two volumes above and /tmp are
+    # writable. /tmp must stay exec-capable — the harness extracts and imports
+    # bundles from there, and `noexec` breaks first boot.
     read_only: true
     tmpfs:
       - /tmp:rw,exec,nosuid,nodev,size=512m
@@ -62,7 +82,6 @@ services:
     security_opt:
       - no-new-privileges:true
     pids_limit: 512
-    restart: unless-stopped
 
 volumes:
   dsh-home:

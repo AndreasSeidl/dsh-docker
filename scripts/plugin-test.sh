@@ -119,7 +119,7 @@ esac
 
 echo "== the profile still boots the web GUI after the install =="
 CID=$(docker run -d \
-  -e HOME=/home/dsh -e DSH_WEB_BIND=0.0.0.0 -e DSH_WEB_PORT=3080 \
+  -e HOME=/home/dsh \
   -v "$VOL:/home/dsh/.dsh" -v "$WSVOL:/workspace" \
   "$IMAGE")
 ok=0

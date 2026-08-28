@@ -18,7 +18,11 @@ Dockerfile             multi-stage build (builder → runtime)
 Makefile               build / run / publish / shell / clean targets
 docker-compose.yml     hardened deploy wiring (proxy + volumes + read-only
                        rootfs); defaults to the published GHCR image and takes
-                       DSH_IMAGE (local build override) / DSH_TAG (pin)
+                       DSH_IMAGE (local build override) / DSH_TAG (pin),
+                       DSH_WEB_PORT (host port), DSH_BIND_ADDRESS (publish address),
+                       DSH_WORKSPACE_DIR
+.env.example           the user-facing settings, commented; users copy it to
+                       .env next to docker-compose.yml (.env is git-ignored)
 .github/workflows/docker-publish.yml   GHCR publishing on tags + weekly
 scripts/build-context.sh  stages the pruned source build context
 scripts/smoke-test.sh     boots the image and checks volumes/persistence/proxy
@@ -123,6 +127,42 @@ Two quirks the image works around, both documented in the Dockerfile:
 - The root `postinstall` (dev-only lefthook git hooks) would fail a `--prod`
   install, so the runtime manifest drops that one script field before the prod
   install runs.
+
+## Guarding image size (never silently bloat again)
+
+In mid-August 2026 the staged harness moved `0.1.1-rc.2 → 0.1.2-alpha.1` and the
+published image quietly grew **~314 MB → ~553 MB**. The mechanism: the lockfile
+bumped the two agent-CLI platform packages (claude-agent-sdk `0.3.220 →
+0.3.241`, codex `0.147 → 0.149`) and the Dockerfile's purge was pinned to the
+OLD exact versions, so the `rm` silently matched nothing while the ~300 MB pair
+of binaries rode along from the dev-install into `--prod`. Nothing failed; the
+image just got bigger.
+
+Three independent layers now keep that class of bug from shipping again:
+
+1. **Dockerfile tripwire (fails the build).** The purge in `prod-deps` matches
+   by **name glob across every linux arch** (never a version), and after the
+   `rm` a `find` scans `node_modules/.pnpm` for any survivor — if a package is
+   renamed, an arch suffix appears, or the paths change, the build exits 1
+   instead of silently shipping 300 extra MB. Also fixed a latent arm64 gap:
+   the old globs only removed `linux-x64`, so the CI arm64 leg would have kept
+   `claude-agent-sdk-linux-arm64`.
+2. **CI size guard (`image-hygiene.yml`).** Runs on PRs into `main`, commits to
+   `main`, and tag pushes. It builds the image from the current harness source
+   (same upstream-tag-resolution fallback as the publish workflow), then
+   asserts (a) no agent-CLI platform packages remain in `/app/node_modules`,
+   and (b) image content stays under `SIZE_CEILING_BYTES` (default
+   `400000000` B ≈ 400 MB — generous for legitimate growth, an order of
+   magnitude below the regression mode). This catches **any** mechanism that
+   bloats the image, not just the named packages: raise the ceiling only as a
+   deliberate, documented decision.
+3. **Smoke-test hygiene check.** `scripts/smoke-test.sh` runs the same package
+   absence assertion on the final image, so a local `DSH_IMAGE=… ./scripts/smoke-test.sh`
+   catches it too — no CI needed to notice.
+
+Also useful when debugging size: `docker image inspect <img> --format '{{.Size}}'`
+(content bytes, uncompressed) and
+`docker run --rm <img> du -sh /app/node_modules/.pnpm`.
 
 ## Build speed (measured)
 

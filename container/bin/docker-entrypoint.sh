@@ -1,45 +1,45 @@
 #!/bin/sh
 # Docker entrypoint for the DeepSeek Harness container.
 #
-# Maps container-friendly environment variables onto the `dsh web` flag family
-# so that a plain `docker run ... dsh-image` behaves exactly like
-# `pnpm dsh web`, while still letting a deployment configure every web-facing
-# knob through the environment instead of editing image internals.
+# Serves the GUI on port 3080 — the port upstream documents — through the
+# bundled reverse proxy, so `docker run -p 3080:3080` and every
+# `http://localhost:3080` in the harness's own docs work unchanged.
+#
+# `dsh web` itself runs behind that proxy on a high loopback-only port
+# (127.0.0.1:30800) so it never collides with the dev servers the agent starts
+# inside the container. Both ports are fixed internals; nothing to configure.
+#
+# Everything a deployment needs to configure is an environment variable; no
+# image internals have to be edited.
 #
 # Env vars consumed here (beyond the ones the harness itself reads straight
 # from the process environment, which all pass through untouched):
 #   DSH_WORKSPACE        Working directory the harness uses as its default
 #                        workspace root (its process.cwd). Defaults to
 #                        /workspace — the volume-backed agent workspace.
-#   DSH_WEB_BIND         Listen host for the *public* endpoint. In the default
-#                        faithful mode this is the harness listener
-#                        ("127.0.0.1", default, same as `pnpm dsh web`;
-#                        "0.0.0.0"/"all"/"::" binds every interface, applied
-#                        via a `--patch` overlay because the harness rejects
-#                        --host 0.0.0.0). In proxy mode (DSH_WEB_PROXY=1) it
-#                        is the proxy's public bind (defaults to 0.0.0.0 so
-#                        LAN/network access works out of the box).
-#   DSH_WEB_PORT         Public listen port (default 3080, same as `pnpm dsh web`).
-#   DSH_WEB_PROXY        Non-empty enables the bundled reverse proxy: the web
-#                        app stays loopback-only on DSH_APP_PORT and the proxy
-#                        publishes DSH_WEB_PORT on DSH_WEB_BIND, rewriting
-#                        Host/Origin to loopback so the /api trust fence and
-#                        the same-origin page both work over the network with
-#                        no further config. Recommended for any deployment
-#                        that is reached beyond the host. It is NOT an auth
-#                        layer; it is the documented place to add one later.
-#   DSH_APP_PORT         Loopback port the web app listens on in proxy mode
-#                        (default 3081).
-#   DSH_WEB_NO_OPEN      Non-empty (default) adds --no-open (containers have no
-#                        browser). Set to 0 to allow the browser-handoff path.
-#   DSH_WEB_TRUSTED_HOSTS  Space- or comma-separated authorities the /api trust
-#                        fence should accept beyond loopback/container IPs, e.g.
-#                        "dsh.example.com" or "host.internal:3080". In proxy
-#                        mode the same variable becomes a Host allow-list at
-#                        the proxy (requests from other Hosts get 403),
-#                        restoring a DNS-rebinding fence in front of the app.
+#   DSH_WEB_PORT         The port on YOUR machine the GUI is published on
+#                        (default 3080). The startup banner prints it, and the
+#                        proxy uses it to rewrite the app's tokenized ready-URL
+#                        line to the public origin. With `docker compose` this
+#                        is passed through automatically; with `docker run` set
+#                        it to match your `-p <port>:3080`. The GUI port
+#                        INSIDE the container is always 3080.
+#
+# NOTE: who may reach the GUI is NOT decided in here. The proxy binds every
+# interface in the container's network namespace, because a published port has
+# nothing to connect to otherwise. The access boundary is the port mapping you
+# choose on the host: `-p 127.0.0.1:3080:3080` serves this machine only (the
+# kernel refuses everything else), `-p 3080:3080` opens it to your network.
+# With compose that is the DSH_BIND_ADDRESS variable. There is no authentication.
 #   DSH_WEB_ARGS         Extra raw arguments appended after the mapped flags
 #                        (must start with "-"; useful for exotic knobs).
+#   DSH_QUIET            Non-empty silences the container's startup banner
+#                        (the URL / volume / credentials summary printed
+#                        before the harness itself starts).
+#
+# Two convenience modes are handled by the container rather than the CLI:
+#   `shell`          -> an interactive bash shell with the same user and mounts
+#   `container-help` -> a short usage summary for this image
 #
 # On the FIRST boot of an empty $DSH_HOME volume the entrypoint seeds default
 # settings.yaml and AGENTS.md (the harness's fixed user-global instructions)
@@ -54,9 +54,130 @@ set -eu
 DSH_BIN=/usr/local/bin/dsh
 DSH_HOME="${DSH_HOME:-/home/dsh/.dsh}"
 
+# ── Friendly startup output ───────────────────────────────────────────────
+# A container hides everything a local install would show you: whether your
+# data is actually on a volume, where the GUI is, whether a key is configured.
+# The banner answers those three questions on every boot, and only nags when
+# something is actually wrong. Set DSH_QUIET=1 to silence it.
+
+# True when $1 is a mount point (i.e. backed by a volume or bind mount) rather
+# than a directory living inside the container's own writable layer.
+is_mounted() {
+  awk -v p="$1" '$5 == p { found = 1 } END { exit !found }' /proc/self/mountinfo 2>/dev/null
+}
+
+# True when the harness has some way to reach a model: an API key in the
+# environment, a credentials file, or an apiKey in settings.yaml.
+has_credentials() {
+  for v in "${DEEPSEEK_API_KEY:-}" "${DSH_API_KEY:-}"; do
+    [ -n "$v" ] && return 0
+  done
+  [ -s "$DSH_HOME/.credentials.yaml" ] && return 0
+  grep -qE '^[[:space:]]*apiKey:[[:space:]]*[^[:space:]#]' "$DSH_HOME/settings.yaml" 2>/dev/null && return 0
+  return 1
+}
+
+print_boot_banner() {
+  [ -n "${DSH_QUIET:-}" ] && return 0
+  workspace="${DSH_WORKSPACE:-/workspace}"
+  web_port="${DSH_WEB_PORT:-3080}"
+
+  echo "" >&2
+  echo "  DeepSeek Harness — starting the web GUI" >&2
+  echo "  ───────────────────────────────────────────────────────────────" >&2
+  echo "  Open        http://localhost:${web_port}" >&2
+  echo "  Access      session-locked: open the \"dsh web:\" URL printed in the" >&2
+  echo "              logs (it carries the one-time session token)" >&2
+  echo "  Data        ${DSH_HOME}" >&2
+  echo "  Workspace   ${workspace}" >&2
+  echo "  Shell in    docker exec -it $(hostname) bash" >&2
+  echo "" >&2
+
+  if ! is_mounted "$DSH_HOME"; then
+    echo "  ! ${DSH_HOME} is NOT on a volume — your settings, credentials and" >&2
+    echo "    chat history are deleted when this container is removed." >&2
+    echo "    Fix:  -v dsh-home:${DSH_HOME}" >&2
+    echo "" >&2
+  fi
+  if ! is_mounted "$workspace"; then
+    echo "  ! ${workspace} is NOT on a volume — files the agent writes are" >&2
+    echo "    deleted when this container is removed." >&2
+    echo "    Fix:  -v dsh-workspace:${workspace}   (or a host directory:" >&2
+    echo "          -v \"\$PWD\":${workspace} to work on your own code)" >&2
+    echo "" >&2
+  fi
+  # A host directory mounted at /workspace keeps its HOST ownership, which is
+  # usually a different uid than the container's unprivileged user — the agent
+  # then reads the code fine but cannot save a single edit. Say so up front
+  # rather than letting it surface as an EACCES mid-session.
+  if [ -d "$workspace" ] && [ ! -w "$workspace" ]; then
+    echo "  ! ${workspace} is read-only for the container user (uid $(id -u))." >&2
+    echo "    The agent can read your files but cannot save changes." >&2
+    echo "    Fix on the host:  sudo chown -R $(id -u):$(id -g) <that folder>" >&2
+    echo "    (or chmod -R a+rwX it, if you would rather not change owners)" >&2
+    echo "" >&2
+  fi
+  if [ -d "$DSH_HOME" ] && [ ! -w "$DSH_HOME" ]; then
+    echo "  ! ${DSH_HOME} is read-only for the container user (uid $(id -u))." >&2
+    echo "    Settings and chat history cannot be saved. If you mounted a host" >&2
+    echo "    folder here, run:  sudo chown -R $(id -u):$(id -g) <that folder>" >&2
+    echo "" >&2
+  fi
+  if ! has_credentials; then
+    echo "  i No model credentials found yet. Either set one at start:" >&2
+    echo "      -e DEEPSEEK_API_KEY=sk-..." >&2
+    echo "    or add your provider key in the GUI's Settings page — it is" >&2
+    echo "    saved to ${DSH_HOME} and reused on every restart." >&2
+    echo "" >&2
+  fi
+}
+
+print_container_help() {
+  cat >&2 <<'HELP'
+DeepSeek Harness container — usage
+
+  Run the web GUI (the default):
+    docker run -d --name dsh -p 127.0.0.1:3080:3080 \
+      -v dsh-home:/home/dsh/.dsh -v dsh-workspace:/workspace \
+      -e DEEPSEEK_API_KEY=sk-... \
+      IMAGE
+    then open http://localhost:3080
+
+  Ports: the GUI is served on 3080, the port upstream documents. The address
+  you publish it on IS the access control -- `-p 127.0.0.1:3080:3080` serves
+  this machine only, `-p 3080:3080` opens it to your whole network, and there
+  is no login screen. (`dsh web` itself runs behind the bundled proxy on
+  127.0.0.1:30800, internal to the container.)
+
+  Work on your own code -- bind your project as the workspace:
+      -v "$PWD":/workspace
+
+Modes (first argument):
+  web                  the web GUI (default)
+  shell                an interactive bash shell with the same mounts
+  plugin ... add PKG   install a harness plugin into a profile
+  container-help       this message
+  anything else        passed straight through to the `dsh` CLI,
+                       e.g. `--profile headless "run the tests"`
+
+Common environment variables:
+  DEEPSEEK_API_KEY     provider key (or configure it in the GUI Settings page)
+  DSH_WEB_PORT         host port the GUI is published on (banner only; default
+                       3080 — set it to match your `-p <port>:3080`)
+  DSH_QUIET=1          silence this container's startup banner
+
+Volumes (mount both, or your work is lost on `docker rm`):
+  /home/dsh/.dsh       settings, credentials, chat history, plugins
+  /workspace           the directory the agent reads and writes files in
+
+Full documentation: https://github.com/AndreasSeidl/dsh-docker
+HELP
+}
+
 # ── First-boot volume initialization ──────────────────────────────────────
 # Idempotent: seeds scaffold files into an empty $DSH_HOME, never overwrites.
-if [ -d "$DSH_HOME" ]; then
+mkdir -p "$DSH_HOME" 2>/dev/null || true
+if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
   for f in settings.yaml AGENTS.md; do
     if [ ! -e "$DSH_HOME/$f" ] && [ -f "/opt/dsh/defaults/$f" ]; then
       cp "/opt/dsh/defaults/$f" "$DSH_HOME/$f"
@@ -73,7 +194,9 @@ fi
 # backs with a volume; relocate it with DSH_WORKSPACE.
 workspace="${DSH_WORKSPACE:-/workspace}"
 if [ ! -d "$workspace" ]; then
-  echo "dsh: workspace '$workspace' does not exist (set DSH_WORKSPACE to an existing directory)" >&2
+  echo "dsh: the workspace directory '$workspace' does not exist inside the container." >&2
+  echo "dsh: mount one, e.g.  -v dsh-workspace:/workspace  (or a host dir:" >&2
+  echo "dsh:   -v \"\$PWD\":/workspace ), or point DSH_WORKSPACE at an existing path." >&2
   exit 1
 fi
 cd "$workspace" || exit 1
@@ -84,10 +207,30 @@ cd "$workspace" || exit 1
 # --profile headless "run"`, `dsh plugin ...`, `dsh --profile web
 # --dump-default-config`).
 mode="${1:-web}"
+
+# Convenience modes handled by the container itself (everything else is a real
+# `dsh` invocation and passes through untouched).
+case "$mode" in
+  shell|bash|sh)
+    # `docker run ... <image> shell` -> an interactive shell in the workspace,
+    # with the same user, mounts and PATH the harness runs under. Saves the
+    # `--entrypoint` dance. Any further arguments go to bash, so
+    # `... shell -c 'dsh --version'` works too.
+    shift
+    exec /bin/bash "$@"
+    ;;
+  container-help|--container-help)
+    print_container_help
+    exit 0
+    ;;
+esac
+
 if [ "$mode" != "web" ]; then
   exec "$DSH_BIN" "$@"
 fi
 if [ "$#" -gt 0 ]; then shift; fi
+
+print_boot_banner
 
 # --no-open for containers (no default browser). Opt out with DSH_WEB_NO_OPEN=0.
 no_open_args=""
@@ -95,69 +238,21 @@ if [ "${DSH_WEB_NO_OPEN:-1}" != "0" ]; then
   no_open_args="--no-open"
 fi
 
-# ── Proxy mode: harness loopback + bundled reverse proxy on the public port ──
-if [ "${DSH_WEB_PROXY:-}" != "" ]; then
-  app_port="${DSH_APP_PORT:-3081}"
-  export DSH_APP_PORT="$app_port"
-  echo "dsh: proxy mode — web app on 127.0.0.1:$app_port, public on \${DSH_WEB_BIND:-0.0.0.0}:\${DSH_WEB_PORT:-3080}" >&2
-  # shellcheck disable=SC2086  # deliberate word-splitting of mapped flags
-  exec /usr/local/bin/node /usr/local/lib/dsh-container/reverse-proxy.mjs \
-    --port "$app_port" \
-    $no_open_args \
-    ${DSH_WEB_ARGS:-} \
-    "$@"
-fi
-
-# ── Faithful mode: run dsh web directly, exactly like `pnpm dsh web` ───────
-# The `web` subcommand owns a small launcher flag set of its own:
-# --patch/--dump-config/--dump-default-config. Put --patch FIRST, right after
-# `web`, so commander consumes it before the app's own (unknown-to-the-launcher)
-# flags start, and everything after is passed through to the web app verbatim.
-patch_args=""
-bind="${DSH_WEB_BIND:-127.0.0.1}"
-case "$bind" in
-  ""|127.0.0.1|loopback|lo)
-    bind="127.0.0.1"
-    ;;
-  0.0.0.0|all|any|::)
-    bind="0.0.0.0"
-    patch_file="${TMPDIR:-/tmp}/dsh-host-bind.patch.yml"
-    cat > "$patch_file" <<EOF
-# Generated by the dsh container entrypoint: bind the web server to all
-# interfaces. The CLI rejects --host 0.0.0.0 for safety, so the bind is
-# configured on the webserver row itself via this --patch overlay.
-- id: webserver
-  config:
-    host: ${bind}
-    port: !!js ctx.webStartup.port ?? ${DSH_WEB_PORT:-3080}
-EOF
-    patch_args="--patch ${patch_file}"
-    ;;
-  *)
-    echo "dsh: unsupported DSH_WEB_BIND '${bind}' (use 127.0.0.1 or 0.0.0.0)" >&2
-    exit 2
-    ;;
-esac
-
-port_args=""
-if [ -n "${DSH_WEB_PORT:-}" ]; then
-  port_args="--port ${DSH_WEB_PORT}"
-fi
-
-trusted_args=""
-trusted_hosts="${DSH_WEB_TRUSTED_HOSTS:-}"
-if [ -n "$trusted_hosts" ]; then
-  # Accept both space and comma separated lists; word-split each token.
-  for host in $(printf '%s' "$trusted_hosts" | tr ',' ' '); do
-    trusted_args="${trusted_args} --trusted-host ${host}"
-  done
-fi
-
+# The web stack is always the same shape: the bundled reverse proxy on 3080
+# with `dsh web` behind it on 127.0.0.1:30800. The proxy rewrites Host/Origin
+# to loopback as it forwards, so the harness's /api trust fence and the
+# browser's same-origin rules both hold with no config, and WebSocket upgrades
+# are transported the same way. Publish 3080: `docker run -p 3080:3080`.
+#
+# Newer harness profiles lock the GUI behind a per-run ?token= session: they
+# 401 until the browser exchanges the printed token for a cookie (303 +
+# Set-Cookie, authority-bound to the loopback origin the proxy presents). The
+# proxy forwards that dance untouched and rewrites the app's ready-URL line to
+# the public origin (using DSH_WEB_PORT), so the user opens the log's
+# "dsh web:" URL and the GUI just works.
+#
 # shellcheck disable=SC2086  # deliberate word-splitting of mapped flags
-exec "$DSH_BIN" web \
-  $patch_args \
+exec /usr/local/bin/node /usr/local/lib/dsh-container/reverse-proxy.mjs \
   $no_open_args \
-  $port_args \
-  $trusted_args \
   ${DSH_WEB_ARGS:-} \
   "$@"

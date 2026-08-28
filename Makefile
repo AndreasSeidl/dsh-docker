@@ -48,7 +48,22 @@ CACHE_REF    ?=
 CACHE_FROM   := --cache-from=type=registry,ref=$(CACHE_REF)
 CACHE_ARGS   := $(if $(CACHE_REF),$(CACHE_FROM))
 
-.PHONY: build publish run shell push tag clean context test-plugins cache-prune cache-reset
+.PHONY: help build publish run shell push tag clean context test-plugins cache-prune cache-reset
+
+.DEFAULT_GOAL := help
+
+## Show this help.
+help:
+	@echo "dsh-container — targets (most people only need the published image;"
+	@echo "                see README.md 'Quick start')"
+	@echo ""
+	@awk 'BEGIN { FS = ":.*" } \
+	     /^## / { if (doc == "") doc = substr($$0, 4); next } \
+	     /^[a-zA-Z0-9_-]+:/ { if (doc != "") printf "  \033[1m%-14s\033[0m %s\n", $$1, doc } \
+	     { doc = "" }' $(MAKEFILE_LIST)
+	@echo ""
+	@echo "Variables: DSH_SRC=$(DSH_SRC)  IMAGE=$(IMAGE)  TAG=$(TAG)  PORT=$(PORT)"
+	@echo "           REGISTRY=$(REGISTRY)  INCLUDE_AGENT_CLIS=0/1  INCLUDE_BUILD_TOOLS=0/1"
 
 ## Build the image from the DSH_SRC checkout.
 build: context
@@ -58,23 +73,22 @@ build: context
 tag: build
 	@echo "tagged: $(IMAGE_TAG)"
 
-## Publish the built image (you must already be logged into $(REGISTRY)).
+## Push the built image to REGISTRY (run `docker login` first).
 publish: push
 
 push:
 	docker push $(IMAGE_TAG)
 
-## Run the GUI: publish the web port, persist the harness home and the agent
-## workspace on volumes. Defaults to reverse-proxy mode so the GUI is reachable
-## over the network (loopback-only unless you override DSH_WEB_BIND).
+## Run the GUI from the locally built image on http://localhost:$(PORT).
+## Publishes the container's GUI port (3080) on PORT and persists the harness
+## home + agent workspace on volumes.
 run:
-	@echo "Starting $(IMAGE_TAG) on http://127.0.0.1:$(PORT) (volumes: dsh-home -> /home/dsh/.dsh, dsh-workspace -> /workspace)"
+	@echo "Starting $(IMAGE_TAG) -> http://localhost:$(PORT)"
+	@echo "  volumes: dsh-home -> /home/dsh/.dsh, dsh-workspace -> /workspace"
+	@echo "  (Ctrl-C stops it; the volumes keep your data.)"
 	docker run --rm -it \
 		--name dsh \
-		-p "$(PORT):$(PORT)" \
-		-e DSH_WEB_PROXY=1 \
-		-e DSH_WEB_BIND=0.0.0.0 \
-		-e DSH_WEB_PORT=$(PORT) \
+		-p "$(PORT):3080" \
 		-v dsh-home:/home/dsh/.dsh \
 		-v dsh-workspace:/workspace \
 		$(IMAGE_TAG)

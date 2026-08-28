@@ -1,10 +1,14 @@
 # Build/experiment artifacts
 .docker-context/
+# Docker CLI config redirected into the workspace (DOCKER_CONFIG; see AGENTS.md)
 .docker-cli/
 .rt-exp/
 .rt-exp2/
 .pnpm-store/
 *.log
+
+# Local compose configuration (.env.example is tracked)
+.env
 
 # Editor/OS noise
 .DS_Store

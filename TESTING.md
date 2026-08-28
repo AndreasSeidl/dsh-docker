@@ -16,8 +16,18 @@ Boots the image the way `pnpm dsh web` would and verifies:
 - the image boots and serves the GUI;
 - the harness-home and workspace **volumes** work, including **persistence
   across a container restart** (seeding, then restart, then re-read);
-- the environment → `dsh web` **flag mapping**: port, bind, trusted hosts /
-  optional `/api` identities.
+- the **fixed in-container ports**: the bundled reverse proxy serving the GUI
+  on 3080 (the port upstream documents), `dsh web` behind it on 127.0.0.1:30800;
+- the **browser-session lock** (`dsh web` 0.1.2+): a request without the
+  per-run token or its cookie gets `401`; the tokenized ready-URL line in the
+  log exchanges for a session cookie (303 + Set-Cookie) and the GUI then
+  answers `200` through the proxy — verified on both 3080 and 30800. The
+  cookie is host-independent (the proxy always presents the fixed loopback
+  authority to the app), so the LAN flow is asserted too: exchanged over a
+  foreign `Host`, the same cookie validates over the container's own IP;
+- that the container is **not** the access fence: the proxy binds every
+  interface in its namespace and serves any Host, so a published port works
+  (the fence is the publish address — see the compose test).
 
 ## Plugin install test — `scripts/plugin-test.sh`
 
@@ -58,10 +68,14 @@ GHCR image**, so the test forces it onto your **local build** (`DSH_IMAGE=$IMAGE
 - the `/tmp` tmpfs stays **EXEC-capable** (the harness's spill store
   `mkdtemp`'s under `/tmp` and dynamic bundle loading imports/spawns from there);
 - `cap_drop ALL` + no-new-privileges + a pids cap are applied;
-- the web GUI is reachable through the published port (proxy mode).
+- the web GUI is reachable through the published port (host port → 3080);
+- the **access fence**: by default the port is published on 127.0.0.1, so the
+  host's own LAN address refuses the connection at the kernel — including a
+  request that spoofs `Host: localhost` — while `DSH_BIND_ADDRESS=0.0.0.0`
+  publishes on every interface and makes the LAN address reachable.
 
-The stack comes up on `DSH_WEB_PORT` (default 3082, to avoid colliding with
-anything on 3080) and is torn down with its volumes afterward.
+The stack comes up on host port `DSH_WEB_PORT` (default 3082, to avoid
+colliding with anything on 3080) and is torn down with its volumes afterward.
 
 ## Plugin test suite — `scripts/test-plugin-suite.sh` (`make test-plugins`)
 

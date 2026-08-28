@@ -178,14 +178,36 @@ RUN node -e "const fs=require('fs');const p='/build/package.json';const j=JSON.p
 RUN --mount=type=cache,target=/pnpm-cache \
     rm -rf node_modules \
  && pnpm install --prod --frozen-lockfile --config.confirmModulesPurge=false --offline
-# The two agent-CLI platform binary packages (~560 MB) are omitted by default
-# (see the main Dockerfile for the rationale); `pnpm install --prod` above ran
-# with dev packages, so they'd otherwise survive here.
+# The two agent-CLI platform binary packages (the codex and claude-agent-sdk
+# native CLIs, ~560 MB for the pair) are omitted by default; `pnpm install
+# --prod` above ran with dev packages, so they'd otherwise survive here.
+# Match them by NAME glob across every linux arch (x64/arm64/...), never a
+# version: upstream bumps these often, and a version-pinned rm silently keeps
+# whatever newer version the current lockfile resolved — a clean ~300 MB image
+# becomes ~550 MB the moment the harness is upgraded (claude-agent-sdk
+# 0.3.220 -> 0.3.241, codex 0.147 -> 0.149). The tripwire below fails the build
+# if the purge ever stops matching (a package rename, a new arch suffix), so a
+# size regression cannot slip through silently again. The CI guard in
+# .github/workflows/image-hygiene.yml is the independent second line: it also
+# asserts package absence in the final image and a size ceiling before anything
+# is tagged/published.
 ARG DSH_INCLUDE_AGENT_CLIS=0
 RUN if [ "${DSH_INCLUDE_AGENT_CLIS}" != "1" ]; then \
-      rm -rf /build/node_modules/.pnpm/@openai+codex@0.147.0-linux-x64 \
-             /build/node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-x64@0.3.220; \
+      rm -rf /build/node_modules/.pnpm/@anthropic-ai+claude-agent-sdk-linux-*@* \
+             /build/node_modules/.pnpm/@openai+codex@*-linux-* \
+             /build/node_modules/.pnpm/@openai+codex-linux-*@*; \
       find /build/node_modules -type l ! -exec test -e {} \; -delete; \
+      leftover="$(find /build/node_modules/.pnpm -maxdepth 1 -type d \( \
+            -name '@anthropic-ai+claude-agent-sdk-linux-*@*' \
+            -o -name '@openai+codex@*-linux-*' \
+            -o -name '@openai+codex-linux-*@*' \) -print | head -3)"; \
+      if [ -n "$leftover" ]; then \
+        echo "FATAL: purged agent-CLI packages are still present:" 1>&2; \
+        echo "$leftover" 1>&2; \
+        echo "The harness renamed/changed these packages — update the purge globs above." 1>&2; \
+        exit 1; \
+      fi; \
+      echo "agent-CLI platform packages purged (none remain)"; \
     fi
 # Round-2 B2: the cache-mount store lives on a different filesystem than
 # node_modules, so pnpm could not hard-link identical files across the
@@ -349,12 +371,15 @@ RUN mkdir -p "$DSH_HOME" /home/dsh/.dsh/.pnpm-store \
       > /home/dsh/.config/pnpm/config.yaml \
  && chown -R dsh:dsh /home/dsh
 
-# The web GUI (same default port as `pnpm dsh web`).
+# 3080 — the port upstream documents — is the bundled reverse proxy, and the
+# port to publish (`docker run -p 3080:3080`). `dsh web` itself sits behind it
+# on 127.0.0.1:30800, reachable only from inside the container.
 EXPOSE 3080
 
-# Different port? Only affects the healthcheck curl, which reads DSH_WEB_PORT.
+# Curl the proxy so the whole chain (proxy -> app) decides health. The port is
+# the fixed 3080 -- the proxy always listens there inside the container.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:${DSH_WEB_PORT:-3080}/" >/dev/null || exit 1
+  CMD curl -fsS "http://127.0.0.1:3080/" >/dev/null || exit 1
 
 USER dsh
 WORKDIR /app

@@ -56,8 +56,11 @@ Notes:
 
 ## Network
 
-- The web GUI is served on port 3080. It may be fronted by a reverse proxy
-  (Host/Origin rewritten internally). There is intentionally NO
-  authentication in front of it for now — do not write API keys or other
+- The web GUI is served on port 3080 by a bundled reverse proxy (Host/Origin
+  rewritten internally); `dsh web` itself runs behind it on 127.0.0.1:30800.
+  Do NOT start your own dev servers on either port. The GUI is session-locked:
+  each boot prints a tokenized "dsh web:" URL in the container log, and any
+  request without that token or its cookie is refused (401). There is no
+  user-facing login beyond that log token — do not write API keys or other
   secrets into files that end up served or committed in this setup.
 - Outbound network access is available (npm registry, model APIs, etc.).

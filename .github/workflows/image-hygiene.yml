@@ -1,0 +1,127 @@
+# Guard: never silently publish a bloated image again.
+#
+# Background: when the staged harness moved 0.1.1-rc.2 -> 0.1.2-alpha.1, the
+# lockfile bumped the two agent-CLI platform packages (claude-agent-sdk
+# 0.3.220 -> 0.3.241, codex 0.147 -> 0.149) and the Dockerfile purge was pinned
+# to the OLD exact versions — so it silently stopped removing them and a
+# ~314 MB image quietly became ~553 MB. The fix (Dockerfile) made the purge
+# version-agnostic AND added a build-time tripwire that fails the build if a
+# survivor remains. This job is the independent second line: it builds the
+# image from the current harness source and asserts (1) no agent-CLI platform
+# packages survived in the final image, and (2) the image content stays under a
+# size ceiling — regardless of HOW a regression sneaks in (a rename, a new
+# agent package, a config change).
+#
+# Runs on the exact events that could reintroduce a harness-version change or a
+# recipe change: PRs into main, commits to main, and tag pushes (the last is
+# what publishes to GHCR). Amd64 only — the arm64 publish leg is covered by the
+# same Dockerfile tripwire, which now purges every linux arch.
+name: image-hygiene
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+    tags: ['v*', '[0-9]*']
+  workflow_dispatch:
+
+env:
+  # Content bytes (docker image inspect {{.Size}}). The post-purge image is
+  # ~322.7 MB; the regression was ~553 MB. This ceiling is generous enough for
+  # legit growth but far below the failure mode it guards. Raise it only as a
+  # deliberate, documented decision.
+  SIZE_CEILING_BYTES: '400000000'
+
+jobs:
+  guard:
+    name: build + size/package hygiene
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout this repo (recipe + build scripts)
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream ref
+        id: upstream
+        run: |
+          REF=""
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            REF="${GITHUB_REF#refs/tags/}"
+            REF="${REF#v}"
+          fi
+          # Upstream tags releases as dsh-v<version>; a bare version is the
+          # workflow_dispatch / manual case. Prefer a matching upstream tag
+          # (plain or dsh-v-prefixed) over the default branch.
+          if [ -n "$REF" ]; then
+            for candidate in "refs/tags/$REF" "refs/tags/dsh-v$REF"; do
+              if git ls-remote --exit-code --refs \
+                   https://github.com/deepseek-ai/deepseek-harness.git \
+                   "$candidate" >/dev/null 2>&1; then
+                REF="${candidate#refs/tags/}"
+                break
+              fi
+            done
+          fi
+          [ -n "$REF" ] || REF="master"
+          echo "ref=$REF" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Checkout harness source
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ steps.upstream.outputs.ref }}
+          path: upstream
+
+      - name: Capture source commit
+        id: commit
+        run: echo "commit=$(git -C upstream rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the build context
+        run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (linux/amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .docker-context
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: dsh-hygiene:check
+          # Self-managing GHA cache (the publish workflow uses the same; a
+          # separate scope so this guard's cache is independent of publishes).
+          cache-from: type=gha,scope=dsh-guard-amd64
+          cache-to: type=gha,mode=max,scope=dsh-guard-amd64
+          build-args: |
+            DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}
+
+      - name: Assert agent-CLI platform packages are gone
+        run: |
+          LEFT="$(docker run --rm --entrypoint /bin/sh dsh-hygiene:check -c \
+            'find /app/node_modules/.pnpm -maxdepth 1 -type d \( \
+               -name "@anthropic-ai+claude-agent-sdk-linux-*@*" \
+               -o -name "@openai+codex@*-linux-*" \
+               -o -name "@openai+codex-linux-*@*" \) -print 2>/dev/null' )"
+          if [ -n "$LEFT" ]; then
+            echo "agent-CLI platform packages survived the purge:"
+            echo "$LEFT"
+            echo "The harness renamed/changed these packages — update the purge"
+            echo "globs in the Dockerfile (DSH_INCLUDE_AGENT_CLIS=0 default)." >&2
+            exit 1
+          fi
+          echo "OK: no agent-CLI platform packages in the final image"
+
+      - name: Assert image size is under the ceiling
+        env:
+          CEILING: ${{ env.SIZE_CEILING_BYTES }}
+        run: |
+          SIZE_BYTES="$(docker image inspect dsh-hygiene:check --format '{{.Size}}')"
+          echo "image content: ${SIZE_BYTES} B (ceiling ${CEILING} B)"
+          if [ "$SIZE_BYTES" -gt "$CEILING" ]; then
+            echo "Image grew to ${SIZE_BYTES} B — over the ${CEILING} B ceiling." >&2
+            echo "Find what was pulled in, or raise the ceiling deliberately in" >&2
+            echo ".github/workflows/image-hygiene.yml." >&2
+            exit 1
+          fi

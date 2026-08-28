@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 #
-# Smoke test for the DeepSeek Harness container: boots the image the way
-# `pnpm dsh web` would, exercises the harness-home and workspace volumes
-# (including persistence across a restart), and verifies the environment →
-# `dsh web` flag mapping (port, bind, optional /api identities).
+# Smoke test for the DeepSeek Harness container: boots the image, exercises the
+# harness-home and workspace volumes (including persistence across a restart),
+# and verifies the fixed in-container layout (bundled reverse proxy on 3080,
+# `dsh web` behind it on 127.0.0.1:30800) plus first-boot seeding.
 #
 # Usage:  DSH_IMAGE=dsh:dev ./scripts/smoke-test.sh
 # Exits nonzero if any check failed.
@@ -45,9 +45,22 @@ wait_ready() { # wait_ready <container>  → waits for the "dsh web: http" line
   done
   return 1
 }
+session_token() { # session_token <container> → the ?token= from the ready line
+  docker logs "$1" 2>&1 | sed -n 's/.*?token=\([A-Za-z0-9_-]*\).*/\1/p' | head -1
+}
 
 echo "== image sanity =="
 check "image exists" docker image inspect "$IMAGE" >/dev/null
+
+echo "== image hygiene: no agent-CLI platform packages (size regressions) =="
+# A version-pinned purge silently stops matching when the harness bumps these
+# packages and the image quietly grows ~300 MB (seen: 0.1.1 -> 0.1.2-alpha.1,
+# claude-agent-sdk 0.3.220->0.3.241, codex 0.147->0.149). The Dockerfile now
+# purges by name-glob and fails the build on a survivor; this is a second,
+# independent assertion straight on the final image.
+check "no claude-agent-sdk/codex linux platform packages in the runtime image" \
+  docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+    '! find /app/node_modules/.pnpm -maxdepth 1 -type d \( -name "@anthropic-ai+claude-agent-sdk-linux-*@*" -o -name "@openai+codex@*-linux-*" -o -name "@openai+codex-linux-*@*" \) -print -quit | grep -q .'
 
 echo "== CLI modes (no server) =="
 check "dsh --version prints a version" docker run --rm "$IMAGE" --version
@@ -68,10 +81,8 @@ check "defaults seeded: AGENTS.md" \
     -v "$HVOL:/home/dsh/.dsh" -v "$WVOL:/workspace" \
     "$IMAGE" -c 'grep -q "Container environment briefing" /home/dsh/.dsh/AGENTS.md'
 
-echo "== boot the web GUI with volumes and 0.0.0.0 bind (faithful mode) =="
+echo "== boot the web GUI with volumes (no configuration at all) =="
 CID=$(docker run -d -p "$PORT:3080" \
-  -e DSH_WEB_BIND=0.0.0.0 \
-  -e DSH_WEB_PORT=3080 \
   -v "$HVOL:/home/dsh/.dsh" \
   -v "$WVOL:/workspace" \
   "$IMAGE")
@@ -81,10 +92,48 @@ echo "  container $CID on host port $PORT"
 if wait_ready "$CID"; then pass "web server ready (URL line logged)"
 else fail "web server never printed its URL line"; docker logs "$CID" 2>&1 | tail -25; fi
 
-check "GET / returns 200 inside the container" \
-  docker exec "$CID" curl -fsS -o /dev/null "http://127.0.0.1:3080/"
-check "GET / returns 200 via the published port" \
-  curl -fsS -o /dev/null "http://127.0.0.1:$PORT/"
+echo "== fixed in-container ports + browser-session auth =="
+# dsh web 0.1.2+ locks the GUI behind a per-run ?token= printed in the ready
+# line: it 401s until the browser exchanges the token for an authority-bound
+# cookie (303 + Set-Cookie). The proxy forwards that dance untouched and
+# rewrites the ready line to the public origin (localhost:<host port>), so the
+# log's "dsh web:" URL is what the user opens.
+TOK=$(session_token "$CID")
+logline=$(docker logs "$CID" 2>&1 | grep "dsh web: http" | head -1)
+if [ -n "$TOK" ] && printf '%s' "$logline" | grep -q "http://localhost:3080/?token="; then
+  pass "tokenized ready URL printed and rewritten to the public origin ($logline)"
+else
+  fail "ready URL missing or not rewritten to the public origin (got: $logline)"; TOK="missing"
+fi
+
+# The whole dance over the PUBLISHED port — the exact path a real user takes:
+check "published URL without a token is refused (401 — session-locked)" \
+  test "$(http_code --max-time 8 "http://127.0.0.1:$PORT/")" = "401"
+CJ=$(mktemp)
+check "token exchange over the published port: /?token=… → 303 + cookie, then the GUI" \
+  curl -fsSL -c "$CJ" -b "$CJ" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT/?token=$TOK"
+check "with the session cookie the GUI answers 200 via the published port" \
+  curl -fsS -o /dev/null -b "$CJ" --max-time 8 "http://127.0.0.1:$PORT/"
+
+# LAN: the cookie is NOT bound to a host name or IP — the proxy always presents
+# the fixed loopback authority to the app, so a cookie exchanged (or the token
+# used) from any machine/Host validates. Assert it: exchange via a foreign Host,
+# then reuse the exact cookie value over the container's own IP with another
+# foreign Host (curl jar domain matching is bypassed by sending the cookie by
+# hand, so this tests the APP, not curl).
+IPCID=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID")
+SESS=$(curl -s -D - -o /dev/null --max-time 10 -H "Host: 192.168.1.50:3080" \
+  "http://$IPCID:3080/?token=$TOK" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | head -1)
+check "cookie is not host-bound: foreign Host/IP validates through the proxy (LAN)" \
+  bash -c 'test -n "$1" && curl -fsS -o /dev/null --max-time 8 \
+    -H "Host: laptop.lan:3080" -H "Cookie: $1" "http://$2:3080/"' _ "$SESS" "$IPCID"
+rm -f "$CJ"
+
+# The fixed in-container ports, verified from inside the container:
+check "proxy chain up inside on 3080 (401 = app's auth gate, not a dead port)" \
+  test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:3080/)" = "401"
+check "dsh web itself answers on 127.0.0.1:30800 (401 = auth gate)" \
+  test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:30800/)" = "401"
 
 echo "== runs as the unprivileged dsh user =="
 uid="$(docker exec "$CID" id -u)"
@@ -123,7 +172,6 @@ docker rename "$CID" "$CID_RESTART" >/dev/null
 docker stop "$CID_RESTART" >/dev/null
 docker rm "$CID_RESTART" >/dev/null
 CID=$(docker run -d -p "$PORT:3080" \
-  -e DSH_WEB_BIND=0.0.0.0 -e DSH_WEB_PORT=3080 \
   -v "$HVOL:/home/dsh/.dsh" \
   -v "$WVOL:/workspace" \
   "$IMAGE")
@@ -134,38 +182,31 @@ check "agent file still present after container recreation" \
 check "harness profile still present after recreation" \
   docker exec "$CID" test -f /home/dsh/.dsh/profiles/web/package.json
 
-echo "== env → dsh web flag mapping =="
+echo "== the container itself is not the access fence =="
+# Who may reach the GUI is decided by the HOST port mapping (see the compose
+# test), so the proxy must bind every interface in its namespace and serve any
+# Host by default — otherwise a published port would have nothing to talk to.
 PORT2=$((PORT+1))
-CID2=$(docker run -d -p "$PORT2:8080" \
-  -e DSH_WEB_BIND=0.0.0.0 \
-  -e DSH_WEB_PORT=8080 \
-  -e DSH_WEB_TRUSTED_HOSTS="smoke.example.com" \
+CID2=$(docker run -d -p "$PORT2:3080" \
   -v "$HVOL2:/home/dsh/.dsh" \
   -v "$WVOL:/workspace" \
   "$IMAGE")
 containers+=("$CID2")
 wait_ready "$CID2"
-check "DSH_WEB_PORT=8080 serves on 8080" \
-  curl -fsS -o /dev/null "http://127.0.0.1:$PORT2/"
 IP2=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID2")
-trusted_code=$(http_code -H "Host: smoke.example.com" "http://$IP2:8080/api/smoke-probe")
-untrusted_code=$(http_code -H "Host: evil.example.com" "http://$IP2:8080/api/smoke-probe")
-if [ "$trusted_code" != "403" ] && [ "$trusted_code" != "000" ]; then
-  pass "/api fence accepts the DSH_WEB_TRUSTED_HOSTS authority (HTTP $trusted_code)"
+check "published port answers (401 from the app's auth gate, not a dead port)" \
+  test "$(http_code --max-time 10 "http://127.0.0.1:$PORT2/")" != "000"
+any_host=$(http_code --max-time 10 "http://$IP2:3080/")
+if [ "$any_host" != "000" ]; then
+  pass "proxy binds every interface and forwards any Host (answered HTTP $any_host)"
 else
-  fail "/api fence rejected the trusted authority (HTTP $trusted_code)"
-fi
-if [ "$untrusted_code" = "403" ]; then
-  pass "/api fence refuses an untrusted Host (HTTP 403)"
-else
-  fail "/api fence did not refuse untrusted Host (HTTP $untrusted_code)"
+  fail "proxy did not serve the container interface (HTTP $any_host)"
 fi
 
 echo "== first-boot seeding is idempotent (user edits survive) =="
 PORT3=$((PORT+6))
 docker exec "$CID2" sh -c 'echo "USER EDITED" >> /home/dsh/.dsh/AGENTS.md'
-CID3=$(docker run -d -p "$PORT3:8080" \
-  -e DSH_WEB_BIND=0.0.0.0 -e DSH_WEB_PORT=8080 \
+CID3=$(docker run -d -p "$PORT3:3080" \
   -v "$HVOL2:/home/dsh/.dsh" \
   -v "$WVOL:/workspace" \
   "$IMAGE")
@@ -182,44 +223,50 @@ store="$(docker run --rm --entrypoint /bin/bash -e HOME=/home/dsh -w /tmp "$IMAG
 check "pnpm store lives on the harness volume" \
   test "${store#/home/dsh/.dsh/.pnpm-store}" != "$store"
 
-echo "== network mode: bundled reverse proxy (DSH_WEB_PROXY=1) =="
+echo "== the bundled reverse proxy (always in front of dsh web) =="
 PORT_PX=$((PORT+7))
 CIDPX=$(docker run -d -p "$PORT_PX:3080" \
-  -e DSH_WEB_PROXY=1 \
-  -e DSH_WEB_BIND=0.0.0.0 \
-  -e DSH_WEB_PORT=3080 \
-  -e DSH_WEB_TRUSTED_HOSTS="px.example.com" \
   -v "$HVOL2:/home/dsh/.dsh" \
   -v "$WVOL:/workspace" \
   "$IMAGE")
 containers+=("$CIDPX")
 wait_ready "$CIDPX"
-check "proxy mode: GET / 200 via the published port" \
-  curl -fsS --retry 6 --retry-connrefused --retry-delay 1 -o /dev/null \
-    -H "Host: px.example.com" "http://127.0.0.1:$PORT_PX/"
+px_code=$(http_code --max-time 10 --retry 5 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$PORT_PX/")
+if [ "$px_code" != "000" ]; then
+  pass "proxy: published port answers with no config at all (HTTP $px_code)"
+else
+  fail "proxy: published port did not answer (000)"
+fi
 IPPX=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CIDPX")
+# Any Host is forwarded — there is deliberately no Host allow-list (any client
+# can claim any Host, so one would not be a boundary; the published port is).
+any_px=$(http_code --max-time 8 "http://$IPPX:3080/")
+if [ "$any_px" != "000" ]; then
+  pass "proxy: serves any Host on the container interface (answered HTTP $any_px)"
+else
+  fail "proxy: did not serve the container interface (HTTP $any_px)"
+fi
+ws_code=000
+# The 0.1.2 web app's realtime channel is /api/remote.mux, and the upgrade
+# handshake needs the same session cookie as the HTTP API.
+CJPX=$(mktemp)
+TOKPX=$(session_token "$CIDPX")
+curl -fsSL -c "$CJPX" -b "$CJPX" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT_PX/?token=$TOKPX" >/dev/null 2>&1
+# A browser sends Origin + the session cookie on the upgrade; assert the proxy
+# relays it into a real 101 (not just any response). Go through the published
+# host port so the cookie jar (bound to 127.0.0.1) is actually sent.
 ws_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-  -H "Host: px.example.com" \
+  -b "$CJPX" -H "Origin: http://localhost:$PORT_PX" \
   -H "Connection: Upgrade" -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
-  "http://$IPPX:3080/api/events.mux")
-if [ "$ws_code" = "101" ] || [ "$ws_code" = "200" ]; then
-  pass "proxy mode: WebSocket upgrade to /api/events.mux got $ws_code (no 403)"
-else
-  fail "proxy mode: WS upgrade failed (HTTP $ws_code)"
-fi
-px_ok=$(http_code -H "Host: px.example.com" "http://$IPPX:3080/api/smoke-probe")
-if [ "$px_ok" != "403" ] && [ "$px_ok" != "000" ]; then
-  pass "proxy mode: Host allow-list forwards the trusted authority (HTTP $px_ok)"
-else
-  fail "proxy mode: trusted authority rejected (HTTP $px_ok)"
-fi
-px_deny=$(http_code -H "Host: evil.example.com" "http://$IPPX:3080/api/smoke-probe")
-if [ "$px_deny" = "403" ]; then
-  pass "proxy mode: untrusted Host refused by the proxy (HTTP 403)"
-else
-  fail "proxy mode: untrusted Host not refused (HTTP $px_deny)"
-fi
+  "http://127.0.0.1:$PORT_PX/api/remote.mux")
+rm -f "$CJPX"
+case "$ws_code" in
+  101) pass "proxy: WebSocket upgrade to /api/remote.mux relayed (101 Switching Protocols)" ;;
+  000) fail "proxy: WS upgrade got no response at all (000)" ;;
+  502) fail "proxy: WS upgrade hit a proxy error (502)" ;;
+  *)   fail "proxy: WS upgrade did not switch protocols (app answered $ws_code)" ;;
+esac
 
 echo
 if [ "$FAILED" -eq 0 ]; then

@@ -4,6 +4,8 @@
 #     that upstream version and push
 #       ghcr.io/<owner>/dsh-docker:<version>   (multi-arch, linux/amd64+arm64)
 #       ghcr.io/<owner>/dsh-docker:latest
+#     Upstream tags releases as `dsh-v<version>`; the resolver accepts both the
+#     plain and prefixed forms so the tagged snapshot is built, never master.
 #   * Every Monday 03:30 UTC → build the upstream default branch and push
 #       ghcr.io/<owner>/dsh-docker:nightly   (keeps "latest source" rolling)
 #   * Manually (workflow_dispatch, `version` input) → build any upstream
@@ -67,14 +69,22 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          if [ -n "$VERSION" ] \
-             && git ls-remote --exit-code --refs \
-                  https://github.com/deepseek-ai/deepseek-harness.git \
-                  "refs/tags/$VERSION" >/dev/null 2>&1; then
-            echo "ref=$VERSION"
-          else
-            echo "ref=master"
-          fi | tee -a "$GITHUB_OUTPUT"
+          # Upstream tags releases as dsh-v<version> (e.g. dsh-v0.1.2-alpha.1).
+          # Try the plain and prefixed forms so a container tag (v0.1.2-alpha.1
+          # or 0.1.2-alpha.1) resolves to the REAL release snapshot instead of
+          # silently falling back to master (which used to mislabel the
+          # published images).
+          REF=""
+          for candidate in "refs/tags/$VERSION" "refs/tags/dsh-v$VERSION"; do
+            if git ls-remote --exit-code --refs \
+                 https://github.com/deepseek-ai/deepseek-harness.git \
+                 "$candidate" >/dev/null 2>&1; then
+              REF="${candidate#refs/tags/}"
+              break
+            fi
+          done
+          [ -n "$REF" ] || REF="master"
+          echo "ref=$REF" | tee -a "$GITHUB_OUTPUT"
 
       - name: Checkout harness source
         uses: actions/checkout@v4
