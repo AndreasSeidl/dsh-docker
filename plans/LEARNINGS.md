@@ -314,14 +314,18 @@ whole-workspace type emission is a fixed 6.65 s + tsdown-client 1.8 s + vite
 - BuildKit "invisible" ~5-7 s (context stream/hash of ~123 MB/12k files +
   tscache cache-mount snapshot persist/restore + engine)
 
-What WHO reduced the docker side: excluding package `src/**` + `*.map` from
-the runtime overlay COPY. Overlay 87 -> 54 MB, export 5.9 -> 3.9 s, gzip export
-303 -> 295 MiB, CONTENT SIZE 319 -> 312 MB (sourcemaps/TS are highly
-compressible so the transfer delta is modest). Full 72-check suite
-(smoke/compose/plugin/plugin-suite) passes on the excluded image. Trade-off:
-no source/sourcemaps inside the deployed image (debug in-container requires the
-maps; the harness never reads its own src at runtime — verified by grep over
-the compiled lib + the suites).
+What reduced the Docker side (final recipe): excluding `*.map` from the
+runtime overlay COPY, keeping package `src/**`. Sourcemaps are the single
+largest build-time-only chunk (~20 MB) and their only consumer is in-image
+source-mapped debugging — niche, and the raw stack-trace text is identical with
+or without them. Keeping src/ preserves readable in-image source (dev-agent
+reference, auditability) at smaller cost than the maps. Measured vs baseline:
+overlay 87 -> 67 MB, export 5.9 -> ~4.5 s, gzip 303 -> 298 MiB, CONTENT
+319 -> 314 MB; 72-check suite passes on the resulting image. The earlier
+both-excluded variant (87 -> 54 MB, 5.9 -> 3.9 s, 295 MiB) also verified but
+judged the worse trade: it gave up all src value for only ~2.7 MiB / ~0.6 s
+more, and in-container source-mapped debugging is not something the deployed
+image's runtime uses.
 
 What did NOT pay off: (a) tsdown affected-only bundling — measured 8.8 -> 7.7 s
 because typert's 6.65 s fixed emission dominates; focused runs ARE byte-identical

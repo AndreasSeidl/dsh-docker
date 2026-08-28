@@ -292,14 +292,16 @@ make build TAG=edge INCLUDE_AGENT_CLIS=1
 Measured for the default build (no agent CLIs), `linux/amd64`, as the
 gzip'd `docker save` payload (the "compressed" size you actually transfer):
 
-- **Default: ~1.4 GB uncompressed / ~295 MiB (~310 MB) compressed** — the
+- **Default: ~1.5 GB uncompressed / ~298 MiB (~312 MB) compressed** — the
   C/native toolchain (gcc g++ make python3 pkg-config) is baked in so
   `dsh plugin add` can compile native addons at runtime when no prebuilt
   binary matches (the default; see the C-toolchain note below). The runtime
-  image ships compiled `lib/` + web `dist` only — package `src/**` and
-  `*.map` sourcemaps are excluded (the harness executes built JS, never its
-  own source; this trims ~35 MB from the per-iteration layer export, verified
-  against the smoke/compose/plugin suites).
+  image drops `*.map` sourcemaps — the largest build-time-only artifact
+  (~20 MB; used only for in-image source-mapped debugging, which the runtime
+  never consumes and which leaves stack-trace text unchanged) — while keeping
+  the original package `src/**` TypeScript as readable in-image
+  reference/audit trail. Overlay 87 -> 67 MB, per-iteration layer export
+  5.9s -> ~4.5s, verified against the smoke/compose/plugin suites.
 - `make build INCLUDE_BUILD_TOOLS=0` drops the compiler/python3 set for a
   leaner **~1.1 GB uncompressed / ~211 MiB (~221 MB)** image; plugin installs
   that need a compiler will then fail.
