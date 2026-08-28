@@ -219,3 +219,13 @@ full suite after tree-changing steps; never edit a runner while it runs.
   (dev tooling) remain in the prod .pnpm tree; prunable in principle but not
   needed for the 250 MB target — left for a future round with per-package boot
   profiling.
+
+### Final resolution — toolchain back in the default (user directive)
+
+Per explicit user request the C/native toolchain is **default ON** again:
+the image is ~303 MiB (~317 MB) gzip / 319 MB CONTENT SIZE, and
+`scripts/plugin-test.sh` now guards the toolchain (asserts gcc/g++/make/
+python3/pkg-config present + node-pty compiles from source via node-gyp).
+The 250 MB slim variant (`INCLUDE_BUILD_TOOLS=0`, 211 MiB) remains available
+and is validated by smoke/compose/test-plugin-suite, but it is no longer the
+default. The incremental-compile iteration speedup (~32 s) is unaffected.

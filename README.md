@@ -13,7 +13,7 @@ and the built browser app. Nothing else runs or mounts on top.
 |---|---|
 | Default behavior | Identical to `pnpm dsh web`: serves the GUI on `http://127.0.0.1:3080`, uses `$DSH_HOME` (= `~/.dsh`) for all harness data, fetches the same model config (via `settings.yaml` / credentials on the volume). |
 | Network mode | `DSH_WEB_PROXY=1` (set by `make run` and `docker-compose.yml`) adds a bundled reverse proxy: the web app stays loopback-only and the proxy publishes the port on the network — so the GUI *just works* over LAN/IP without extra config, and it is the documented place to add authentication later. |
-| Footprint | ~211 MiB transferred-compressed by default; see [Size](#size) for measured numbers. The native-build toolchain is an opt-in (`INCLUDE_BUILD_TOOLS=1`) so the default image stays under 250 MB. |
+| Footprint | ~303 MiB transferred-compressed including the native-build toolchain (opt out with `INCLUDE_BUILD_TOOLS=0`); see [Size](#size) for measured numbers. |
 | User | Runs as an unprivileged `dsh` user, under `tini` (PID 1), with a hardened compose profile (`read_only` rootfs, no capabilities, no privilege escalation, pid cap). |
 | Config | Everything the harness exposes is reachable through environment variables (see [Configuration](#configuration)). |
 | Runs anywhere | `node apps/cli/lib/bin.js` is the prebuilt CLI; there is no source, repo, or pnpm dev-tooling in the runtime image (pnpm remains so `dsh plugin` still works). |
@@ -186,11 +186,9 @@ The image is set up so installs work with no extra steps:
   market) and its global config bakes in `dangerouslyAllowAllBuilds: true` —
   dependency build scripts (prebuilt downloads and `node-gyp` compiles) run
   without interactive approval;
-- a **C/native toolchain** is NOT baked in by default (that would push the
-  image past 250 MB). Rebuild with `make build INCLUDE_BUILD_TOOLS=1` for a
-  variant in which plugins that compile native addons build even when no
-  prebuilt binary matches. The default image still installs pure-JS and
-  prebuilt-native plugins;
+- a **C/native toolchain** (`gcc`, `g++`, `make`, `python3`, `pkg-config`)
+  is in the runtime so plugins that compile native addons build even when no
+  prebuilt binary matches (drop it with `INCLUDE_BUILD_TOOLS=0`);
 - pnpm's **content store lives on the `$DSH_HOME` volume** (`.pnpm-store`), so
   installs are fast and survive container recreation.
 
@@ -294,19 +292,21 @@ make build TAG=edge INCLUDE_AGENT_CLIS=1
 Measured for the default build (no agent CLIs), `linux/amd64`, as the
 gzip'd `docker save` payload (the "compressed" size you actually transfer):
 
-- **Default: ~1.1 GB uncompressed / ~211 MiB (~221 MB) compressed** — the
-  C/native toolchain is **not** baked in by default (round-3); this is what
-  keeps the image under the 250 MB goal while the harness remains fully
-  functional (its own native addons are compiled once at image build).
-- `make build INCLUDE_BUILD_TOOLS=1` re-adds the compiler/python3 set for a
-  **~1.5 GB uncompressed / ~303 MiB (~317 MB)** image such that `dsh plugin add`
-  can compile native addons at runtime.
+- **Default: ~1.5 GB uncompressed / ~303 MiB (~317 MB) compressed** — the
+  C/native toolchain (gcc g++ make python3 pkg-config) is baked in so
+  `dsh plugin add` can compile native addons at runtime when no prebuilt
+  binary matches (the default; see the C-toolchain note below).
+- `make build INCLUDE_BUILD_TOOLS=0` drops the compiler/python3 set for a
+  leaner **~1.1 GB uncompressed / ~211 MiB (~221 MB)** image; plugin installs
+  that need a compiler will then fail.
 
-The harness core never compiles at runtime, so the default (toolchain-less)
-image runs the web GUI, sessions, models, MCP, and pure-JS/prebuilt plugins
-unimpaired — the full smoke/compose suites pass on it. Only plugin installs
-that need a C++/Python compile (no matching prebuilt binary) require the
-`INCLUDE_BUILD_TOOLS=1` variant.
+The toolchain is kept by default because "plugin installs work for anything"
+beats ~100 MB of compressed size; the harness's own native addons (node-pty,
+sharp, koffi) are compiled once at image build and need no toolchain at
+runtime, but third-party plugins with no prebuilt native binary do. The
+"runtime toolchain" decision is guarded by `scripts/plugin-test.sh`, which
+asserts gcc/g++/make/python3/pkg-config are present AND that node-pty builds
+from source through node-gyp in the image.
 
 ## CI: automatic publishing on release tags
 

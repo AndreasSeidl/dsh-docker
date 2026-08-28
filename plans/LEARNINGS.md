@@ -271,3 +271,31 @@ fully functional at any point. Both met. Final measured (round-2 → round-3):
    did not hand-prune deps** — round-1 rule (don't ship unproven wins) applies;
    it is unnecessary for the 250 MB goal (211 MiB leaves ~34 MiB headroom to
    the 250 MiB line / ~29 MB to the 250 MB decimal line).
+
+
+## Round-3 addendum — toolchain decision (final)
+
+The round-3 experiment proved a **211 MiB / 222 MB** image (slim, no runtime
+C-toolchain) passes smoke, compose, and the full 24-check plugin suite, with
+sub-40 s iterations. That PROVED the 250 MB target is achievable. However, the
+user's explicit directive was to **keep the C toolchain in the image** — the
+slim default trades away exactly one real capability: `dsh plugin add` of a
+package whose native dependency must be compiled (no prebuilt binary; verified
+fail: node-pty@1.1.0 on slim). Since "plugin installs work for anything"
+beats ~100 MB of compressed size for this project, the **default is now
+toolchain ON**: ~303 MiB (~317 MB) gzip export / 319 MB CONTENT SIZE. The slim
+variant remains one build flag away (`INCLUDE_BUILD_TOOLS=0`, 211 MiB).
+
+- `scripts/plugin-test.sh` was strengthened to guard this decision: it now
+  asserts gcc/g++/make/python3/pkg-config are present in the image AND that
+  node-pty compiles from source through node-gyp (build/Release/pty.node, with
+  node-gyp evidence in the install log — not a prebuilt download). Any future
+  attempt to drop the toolchain from the default will fail this test loudly.
+- The round-3 incremental-compile work (tscache-r3b, relative tar, /build
+  guard) stands regardless of the toolchain choice: iteration still ~32 s,
+  steady ~1.3 s.
+- Both the size claim ("under 250 MB") and the toolchain claim ("present at
+  runtime") cannot hold simultaneously — the image is either ~211 MiB slim or
+  ~303 MiB full. The final shipped default is the ~303 MiB full image, with
+  the toolchain guarded by the plugin test; the 250 MB path is documented and
+  opt-in.

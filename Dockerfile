@@ -227,14 +227,12 @@ FROM ${NODE_BASE} AS runtime
 # Runtime OS packages: bash (the model-facing shell tools spawn it), git,
 # curl (web tools + healthcheck), ca-certificates (TLS), and tini (PID 1:
 # reaps the orphaned/zombie children an agent's shell commands leave behind).
-# Whether to bake a C/native toolchain (gcc g++ make python3 pkg-config) so
+# A C/native toolchain (gcc g++ make python3 pkg-config) is baked in so
 # `dsh plugin add <pkg>` can compile native addons (node-pty, sharp, ...) at
-# runtime without a matching prebuild. DEFAULT OFF: the harness itself never
-# compiles at runtime (its own native addons are built at image build), and
-# skipping the ~100 MB compressed toolchain layer is what brings the image
-# under the 250 MB goal. Set DSH_INCLUDE_BUILD_TOOLS=1 for the full image
-# (plugin installs that need a compiler will then work).
-ARG DSH_INCLUDE_BUILD_TOOLS=0
+# runtime when no prebuilt binary matches. It costs ~100 MB compressed (~317 MB
+# image vs ~221 MB without); set DSH_INCLUDE_BUILD_TOOLS=0 to drop it for a
+# leaner image (plugin installs that need a compiler will then fail).
+ARG DSH_INCLUDE_BUILD_TOOLS=1
 # Round-2 B1: build-essential drags in dpkg-dev/fakeroot/etc.; node-gyp only
 # needs the compiler + python3 + make. Use the minimal set (still compiles
 # node-pty-style addons); verified by scripts/plugin-test.sh.

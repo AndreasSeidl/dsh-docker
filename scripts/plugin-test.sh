@@ -3,15 +3,18 @@
 # Plugin-install test for the DeepSeek Harness container.
 #
 # Proves the runtime can install a real profile plugin end-to-end:
+#   * the image actually carries the C/native toolchain (gcc g++ make python3
+#     pkg-config) — the guard for the toolchain DEFAULT; if this fails the
+#     image was built with INCLUDE_BUILD_TOOLS=0;
 #   * pnpm is on PATH and its global config allows dependency build scripts;
-#   * a plugin whose install compiles/sets up native code works with the
-#     bundled toolchain (no interactive `pnpm approve-builds`, no missing
-#     package manager);
+#   * a plugin whose install compiles native code via node-gyp builds from
+#     source with the bundled toolchain (no interactive `pnpm approve-builds`,
+#     no missing package manager, no prebuild handed it the binary);
 #   * the installed plugin (and its compiled binary) persists on the volume
 #     and the harness still boots the web profile afterward.
 #
-# Uses node-pty (a native module that compiles via node-gyp/prebuild) because
-# it is exactly the class of dependency plugin installs routinely fail on.
+# Uses node-pty (a native module that compiles via node-gyp) because it is
+# exactly the class of dependency plugin installs routinely fail on.
 #
 # Note on the bundle registry: the harness only auto-registers packages that
 # declare a `dsh.bundle` field; a plain dependency like node-pty is installed
@@ -49,8 +52,26 @@ rc=$?
 if [ "$rc" -eq 0 ]; then pass "dsh plugin --profile web add node-pty exited 0"
 else fail "dsh plugin add node-pty failed (exit $rc)"; tail -20 "$LOG"; fi
 
+echo "== the runtime image carries the C/native toolchain =="
+# Guard for the DSH_INCLUDE_BUILD_TOOLS default: native-addon compiles at
+# install time need gcc/g++/make/python3/pkg-config IN the runtime image.
+check_toolchain() {
+  docker run --rm --entrypoint /bin/bash "$IMAGE" -lc 'set -e
+    for b in gcc g++ make python3 pkg-config; do
+      if ! command -v "$b" >/dev/null 2>&1; then echo "missing: $b"; exit 1; fi
+    done
+    gcc --version && make --version && python3 --version'
+}
+if check_toolchain; then
+  pass "C/native toolchain present in the image (gcc g++ make python3 pkg-config)"
+else
+  fail "C/native toolchain missing from the image — native-addon plugin installs rely on it; build with INCLUDE_BUILD_TOOLS=1 (the default)"
+fi
+
 check_native() {
-  # The native build must have produced the pty.node binary in the profile.
+  # The native build must have produced the COMPILED pty.node in the profile
+  # (build/Release is the node-gyp output dir; a downloaded prebuild would
+  # land under prebuilds/, not here).
   docker run --rm --entrypoint /bin/bash \
     -e HOME=/home/dsh \
     -v "$VOL:/home/dsh/.dsh" \
@@ -58,8 +79,15 @@ check_native() {
     "$IMAGE" -lc \
     'test -f /home/dsh/.dsh/profiles/web/node_modules/node-pty/build/Release/pty.node && node -e "process.stdout.write(String(require(\"/home/dsh/.dsh/profiles/web/node_modules/node-pty\")))" >/dev/null 2>&1'
 }
+check_compiled() {
+  # The install log must show node-gyp actually compiling from source, so a
+  # prebuilt download cannot fake the native-build check.
+  grep -q "node-gyp" "$LOG"
+}
 if check_native; then pass "node-pty native build present and loadable from the profile"
 else fail "node-pty native build missing (build blocked or failed?)"; fi
+if check_compiled; then pass "install log shows node-gyp compiling from source (not a prebuilt download)"
+else fail "expected node-gyp compile evidence in the plugin install log"; grep -n "gyp\|prebuild" "$LOG" | head -5; fi
 
 # The harness's bundle-registration machinery must have engaged (it announces
 # when a package declares no dsh.bundle and installs it as a plain dependency).
