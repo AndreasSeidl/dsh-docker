@@ -299,3 +299,39 @@ variant remains one build flag away (`INCLUDE_BUILD_TOOLS=0`, 211 MiB).
   ~303 MiB full. The final shipped default is the ~303 MiB full image, with
   the toolchain guarded by the plugin test; the 250 MB path is documented and
   opt-in.
+
+## Docker-side iteration cost — analysis (what the ~15s is, and the one safe cut)
+
+Measured decomposition of a one-line-edit iteration (~31 s): real build work in
+the builder is ~14 s (tsc ~1.3 s + tsdown-host 9.4 s, of which typert's
+whole-workspace type emission is a fixed 6.65 s + tsdown-client 1.8 s + vite
+2.3 s + tscache tar ~0.6 s); Docker-side is the remaining ~15 s =
+- export/unpack of the changed runtime overlay ~6 s  (overlay ~82 MB; only
+  ~22 MB is runtime-needed JS — ~20 MB src + ~20 MB .map + ~4 MB d.ts are
+  build-time only)
+- replayed runtime-stage layers ~1.6 s
+- builder rig (COPY source + pnpm install + carve) ~2 s
+- BuildKit "invisible" ~5-7 s (context stream/hash of ~123 MB/12k files +
+  tscache cache-mount snapshot persist/restore + engine)
+
+What WHO reduced the docker side: excluding package `src/**` + `*.map` from
+the runtime overlay COPY. Overlay 87 -> 54 MB, export 5.9 -> 3.9 s, gzip export
+303 -> 295 MiB, CONTENT SIZE 319 -> 312 MB (sourcemaps/TS are highly
+compressible so the transfer delta is modest). Full 72-check suite
+(smoke/compose/plugin/plugin-suite) passes on the excluded image. Trade-off:
+no source/sourcemaps inside the deployed image (debug in-container requires the
+maps; the harness never reads its own src at runtime — verified by grep over
+the compiled lib + the suites).
+
+What did NOT pay off: (a) tsdown affected-only bundling — measured 8.8 -> 7.7 s
+because typert's 6.65 s fixed emission dominates; focused runs ARE byte-identical
+to full runs (correct), just not worth it; (b) skipping typert on non-typert
+edits — would save ~6.6 s but needs a fragile "recompiled-set" rule and paying
+full cost on typert-package edits; (c) trimming d.ts/i18n/spec from the overlay
+(more risk than the ~4 MB saved; left out).
+
+Structural note: the immutable floor of image-build iteration is the runtime
+overlay export (~2-6 s) + ~6 s of compile that must re-run (tsdown-host/vite)
++ BuildKit bookkeeping; anything "still feel slow" past ~25 s is the 246-project
+TS/typert compile itself, which the tier-3 dev profile (source mounted,
+build/HMR in a live container, no image per edit) is the real answer to.

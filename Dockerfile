@@ -261,8 +261,15 @@ WORKDIR /app
 # source (from builder). Two COPYs: node_modules everywhere comes from
 # prod-deps; the builder overlays only source/compiled output (no node_modules)
 # so its dev deps never enter the image.
+#
+# The builder overlay drops the package source (src/) and .map files: the
+# runtime executes only the compiled lib/ + web dist, so carrying them wastes
+# ~35 MB and slows every source-edit iteration's layer export (the overlay is
+# what the final COPY re-packs each time, measured 5.9s -> 3.9s export, image
+# ~7 MiB smaller). Trade-off: no in-image source/sourcemaps for debugging;
+# verified against smoke/compose/plugin suites.
 COPY --from=prod-deps --chown=dsh:dsh /build/ /app/
-COPY --exclude=node_modules --from=builder --chown=dsh:dsh /build/ /app/
+COPY --exclude=node_modules --exclude='**/src' --exclude='**/*.map' --from=builder --chown=dsh:dsh /build/ /app/
 COPY --chown=dsh:dsh .container/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chown=dsh:dsh .container/scripts/heal-workspace-links.mjs \
         .container/scripts/inject-randomuuid-polyfill.mjs \
