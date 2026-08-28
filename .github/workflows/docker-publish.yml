@@ -95,7 +95,7 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           if [ -n "$VERSION" ]; then
-            printf 'tags=%s\nlatest\n' "$VERSION" | tee -a "$GITHUB_OUTPUT"
+            echo "tags=$VERSION,latest" | tee -a "$GITHUB_OUTPUT"
           else
             echo "tags=nightly" | tee -a "$GITHUB_OUTPUT"
           fi
