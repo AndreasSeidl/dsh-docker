@@ -329,6 +329,17 @@ pushes to GHCR:
 Both `linux/amd64` and `linux/arm64` are built and pushed. Tags in the recipe
 repo and harness versions map 1:1 (`v`-prefix optional).
 
+CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
+`mode=max` so the builder stages stay warm between runs. It is
+*self-managing*: GitHub caps it per repository (~10 GB on public repos) and
+evicts LRU / 7-day-stale entries, so it cannot grow without bound. Earlier
+versions also exported a `type=registry` cache tagged `<image>:buildcache` on
+GHCR — that one is **additive with no automatic size eviction** and would have
+accumulated cache blobs on GHCR indefinitely (the registry analogue of the
+bounded-on-the-host cache problem below), so it was removed. The weekly
+`nightly` build tolerates an occasional cold-start if the 7-day TTL evicts the
+cache first.
+
 ## How the image is built (for maintainers)
 
 ```
@@ -402,6 +413,31 @@ Two quirks the image works around, both documented in the Dockerfile:
 - The root `postinstall` (dev-only lefthook git hooks) would fail a `--prod`
   install, so the runtime manifest drops that one script field before the prod
   install runs.
+
+### Cache hygiene (keeping the build cache bounded)
+
+Plain `docker build` retains its intermediate layers (BuildKit `mode=max`
+semantics), so **the local build cache grows without bound** — the round-3
+experiments reached ~100 GB back-to-back. Two things keep it manageable:
+
+- **Bound it on demand:** `make cache-prune` runs
+  `docker buildx prune -f --keep-storage=5G`, trimming the cache back to
+  ~5 GB (the in-use layer set stays, so warm rebuilds keep working). For a
+  zero-cache cold start use `make cache-reset` (full `prune -af`).
+- **The incremental-compile cache is source-commit-keyed.** The Dockerfile
+  persists compile state (`lib/`, `dist/`, `*.tsbuildinfo`) on a BuildKit cache
+  mount so source-edit iterations recompile only the changed graph. That state
+  is tagged with the source commit it was built from and **discarded whenever
+  the staged source changes** — stale compile state from another harness
+  version made warm builds non-deterministic (the earlier parallel host+client
+  compile could also race `@deepseek-ai/*/remote` generation, so the build now
+  uses upstream's own serial `build:lib:host → build:lib:client → build:web`
+  order). Same-commit rebuilds stay warm (~2 s layer reuse / ~40 s incremental);
+  cross-commit builds always start from a clean compile.
+
+On CI the same effect is handled by the workflow above: GitHub's Actions cache
+caps and evicts automatically, and the unbounded registry buildcache was
+removed.
 
 ## Development layout
 

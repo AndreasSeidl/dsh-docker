@@ -109,18 +109,21 @@ jobs:
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           # Warm-cache plumbing (keeps repeated/CI builds from being cold):
-          #   * gha    — GitHub Actions cache backend (fast, repo-scoped, ~7d TTL
-          #              for big caches; enough for same-week iteration).
-          #   * registry — persistent cache manifest next to the image on GHCR
-          #              (survives GC, keeps the weekly builds warm).
-          # mode=max stores intermediate layers so the builder stages (~90% of
-          # the compile cost) are reused, not just the final runtime image.
+          #   * type=gha — GitHub Actions cache backend. SELF-MANAGING: GitHub
+          #     caps it per repo (~10 GB for public repos) and evicts LRU and
+          #     7-day-stale entries, so it cannot grow without bound the way a
+          #     local BuildKit store can. mode=max stores intermediate layers so
+          #     the builder stages (~90% of the compile cost) are reused, not
+          #     just the final runtime image.
+          #   * The registry buildcache (`<image>:buildcache`) that this workflow
+          #     previously exported is intentionally gone: it is additive and has
+          #     NO automatic size eviction, so it accumulated cache blobs on GHCR
+          #     unboundedly — the registry analogue of a 100 GB local build cache.
+          #     gha alone keeps builds warm within GitHub's enforced cache budget.
           cache-from: |
             type=gha
-            type=registry,ref=${{ steps.tags.outputs.image }}:buildcache
           cache-to: |
             type=gha,mode=max
-            type=registry,mode=max,ref=${{ steps.tags.outputs.image }}:buildcache
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}

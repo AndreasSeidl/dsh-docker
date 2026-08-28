@@ -35,6 +35,10 @@ BUILD_ARGS   += --build-arg DSH_INCLUDE_BUILD_TOOLS=$(if $(filter 0 no off,$(INC
 # Host port for `make run` (inside the container the same value is used).
 PORT         ?= 3080
 
+# BuildKit cache ceiling kept by `make cache-prune` (see below). BuildKit's
+# accounting can overshoot slightly; the in-use layer set always stays.
+KEEP_STORAGE ?= 5G
+
 # Optional registry cache ref to seed `docker build` from (the one the GitHub
 # Actions workflow pushes as <registry>/<repo>:buildcache), e.g.
 #   make build CACHE_REF=ghcr.io/acme/dsh:buildcache
@@ -44,7 +48,7 @@ CACHE_REF    ?=
 CACHE_FROM   := --cache-from=type=registry,ref=$(CACHE_REF)
 CACHE_ARGS   := $(if $(CACHE_REF),$(CACHE_FROM))
 
-.PHONY: build publish run shell push tag clean context test-plugins
+.PHONY: build publish run shell push tag clean context test-plugins cache-prune cache-reset
 
 ## Build the image from the DSH_SRC checkout.
 build: context
@@ -95,3 +99,14 @@ test-plugins:
 ## Remove the staged build context and local experiment dirs.
 clean:
 	rm -rf $(CONTEXT_DIR) .rt-exp .rt-exp2 .pnpm-store
+
+## Bound the local BuildKit cache: prune back to KEEP_STORAGE (default 5G).
+## Every `docker build` retains its intermediate layers (mode=max semantics), so
+## without this the cache grows without bound (100 GB observed during round-3
+## experiments). The most-recently-used ~5G survives, keeping warm rebuilds.
+cache-prune:
+	docker buildx prune -f --keep-storage=$(KEEP_STORAGE)
+
+## Start from a zero cache (forces a cold rebuild; use sparingly).
+cache-reset:
+	docker buildx prune -af

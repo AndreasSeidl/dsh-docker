@@ -273,6 +273,62 @@ fully functional at any point. Both met. Final measured (round-2 → round-3):
    the 250 MiB line / ~29 MB to the 250 MB decimal line).
 
 
+## Round 4 — CI publishing, cache hygiene, and the two real bugs found (2025-08-28)
+
+Context: first GitHub release (`v0.1.1-rc.2`) of the recipe repo. Two CI runs
+fail + a 100 GB local build cache forced this pass. Findings, all verified by
+reproduction:
+
+1. **`$GITHUB_OUTPUT` rejects bare (keyless) lines.** The tags step wrote
+   `latest` on its own line → runner failed the step ("value is missing from
+   the name/value separator"). Rule: every `$GITHUB_OUTPUT`/`$GITHUB_ENV` line
+   must be `name=value`. Fixed with `echo "tags=$VERSION,latest"`.
+
+2. **GHCR/buildx reject mixed-case image refs.** `ghcr.io/${{ github.repository }}`
+   keeps the owner's case (`AndreasSeidl`), and the registry cache exporter
+   failed on it. There is no `lower()` in the Actions expression language, so
+   compute it with bash `${GITHUB_REPOSITORY@L}` in a `run` step.
+
+3. **The parallel host+client compile (round-3 A3) races on a clean build.**
+   Current upstream emits `@deepseek-ai/*/remote` modules during the HOST
+   build; the client `tsc` imports them. `build:lib:host & build:lib:client &
+   wait` on a cold builder → client tsc runs before the host emits the remote
+   modules → hundreds of TS2307 "Cannot find module '.../remote'". Round-3's
+   "byte-identical parallel" finding only held for the older upstream layout.
+   **The Dockerfile now uses upstream's own serial order** (`build:lib:host →
+   build:lib:client → build:web`, what `scripts/build.ts` runs). Verified: cold
+   docker build + host serial build both pass; concurrent cold build fails.
+
+4. **The incremental-compile cache mount poisons across source versions.** The
+   `tscache` restore is keyed only by mount id (`tscache-r3b`); when the staged
+   upstream source moved, the restored stale `lib/`/`.d.ts` bundles made tsdown
+   fail with `MISSING_EXPORT` (e.g. `createApiRemoteAgentResolver`) even on the
+   serial build — a warm-build failure that cold builds never hit. Fix: tag the
+   cached state with the source commit and **discard it when the commit
+   changes** (`/tscache/.source-commit`). Same-commit rebuild still warm; a
+   moved source always compiles clean.
+
+5. **The build cache is unbounded and that matters.** 100 GB of BuildKit cache
+   after the experiment runs; a big chunk is intermediate layers + cache-mount
+   archives, and the poisoned state above is how stale cache made its way into
+   builds. Tooling: `make cache-prune` (`docker buildx prune
+   --keep-storage=5G`, keeps ~5 GB for warm builds), `make cache-reset`
+   (`prune -af`). CI: `type=gha,mode=max` only — GitHub caps it (~10 GB) and
+   evicts LRU/7-day, so it self-bounds. The `type=registry` buildcache
+   (`<image>:buildcache`) was removed: it is additive with no size eviction and
+   would grow GHCR unboundedly, the registry analogue of point 5.
+
+6. **Host reproduction gotchas (reproduce, but stay out of the host sandbox's
+   way):** read-only `$HOME` breaks docker buildx (`~/.docker/buildx/activity`),
+   corepack (`~/.cache/node/corepack`) and pnpm's default store (`~/.local/
+   share/pnpm`) — redirect `DOCKER_CONFIG`, `COREPACK_HOME`/`npm_config_cache`
+   and `--store-dir` into a writable workspace dir. `pnpm run clean` in the
+   upstream repo deletes `node_modules` too (fine, but re-install before a
+   build test). Don't `rm -rf packages apps vendor native` in a repro clone
+   (restore is `git checkout -- <dirs>`).
+
+---
+
 ## Round-3 addendum — toolchain decision (final)
 
 The round-3 experiment proved a **211 MiB / 222 MB** image (slim, no runtime

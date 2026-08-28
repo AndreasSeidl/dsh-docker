@@ -95,22 +95,33 @@ RUN --mount=type=cache,target=/pnpm-cache \
     pnpm install --frozen-lockfile
 # Compile the host libs, client libs, and the web frontend (`pnpm run build`,
 # the exact command the project's own dev flow uses).
-# R3 (round 3) incremental compile: run the host and client lib builds
-# concurrently (from A3) AND persist the compile state (every lib/, dist/ and
-# *.tsbuildinfo) on a BuildKit cache mount. On a source-edit iteration the
-# restored state lets `tsc -b` recompile only the affected project graph while
-# tsdown re-packages (measured: 32.9 s full-image iteration vs 47.9 s compile
-# alone before; outputs verified byte-identical to a clean build).
+# Build ORDER matters: `build:lib:host` first, then `build:lib:client`, then
+# `build:web`. The client `tsc` imports `@deepseek-ai/*/remote` modules that the
+# HOST build emits, so a parallel host+client run races on clean builds —
+# upstream's own `build:lib` (`scripts/build.ts`) is serial for the same reason.
+# Incremental compile: the compile state (lib/, dist/, *.tsbuildinfo) persists
+# on a BuildKit cache mount so `tsc -b` recompiles only the affected project
+# graph on a source-edit iteration. The state is KEYED TO THE SOURCE COMMIT it
+# was produced from: if the staged source changes, the cached state is
+# discarded and the clean build runs. Stale compile state from another source
+# version made warm builds non-deterministic (tsdown MISSING_EXPORT on restored
+# stale bundles); the commit marker makes that class impossible.
 RUN --mount=type=cache,target=/pnpm-cache \
     --mount=type=cache,target=/tscache,id=tscache-r3b <<'R3INC'
 set -e
-# Restore the previous build's compiled state (relative paths; see save()).
+# Restore the previous build's compiled state ONLY if it belongs to the same
+# source commit (relative paths; see save()).
 restore() {
-  if [ -f /tscache/art.tar ]; then
+  if [ -f /tscache/.source-commit ] \
+     && [ "$(cat /tscache/.source-commit)" = "$DSH_CLIENT_COMMIT_HASH" ] \
+     && [ -f /tscache/art.tar ]; then
     tar -C /build -xf /tscache/art.tar
     # Guard: a relative-path archive must never leave a stray /build dir
     # (round-2 A2 hit this; a poisoned mount restored build/... into /build).
     rm -rf /build/build
+  else
+    echo "tscache: source changed (had '$(cat /tscache/.source-commit 2>/dev/null || echo none)', now '$DSH_CLIENT_COMMIT_HASH') — compiling fresh"
+    rm -f /tscache/art.tar
   fi
 }
 save() {
@@ -119,9 +130,12 @@ save() {
     && { find . -path './node_modules' -prune -o -type d \( -name lib -o -name dist \) -print; } > /tmp/outdirs \
     && find . -name '*.tsbuildinfo' -not -path '*/node_modules/*' -print >> /tmp/outdirs \
     && tar -c -f /tscache/art.tar -T /tmp/outdirs)
+  printf '%s' "$DSH_CLIENT_COMMIT_HASH" > /tscache/.source-commit
 }
 restore
-sh -c 'pnpm run build:lib:host & pnpm run build:lib:client & wait; pnpm run build:web'
+pnpm run build:lib:host
+pnpm run build:lib:client
+pnpm run build:web
 save
 R3INC
 
