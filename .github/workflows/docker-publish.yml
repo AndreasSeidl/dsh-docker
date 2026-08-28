@@ -2,18 +2,19 @@
 #
 #   * On a git TAG (e.g. `v0.1.1-rc.2` or `0.1.1-rc.2`) → build the harness at
 #     that upstream version and push
-#       ghcr.io/<owner>/dsh-docker:<version>
+#       ghcr.io/<owner>/dsh-docker:<version>   (multi-arch, linux/amd64+arm64)
 #       ghcr.io/<owner>/dsh-docker:latest
 #   * Every Monday 03:30 UTC → build the upstream default branch and push
 #       ghcr.io/<owner>/dsh-docker:nightly   (keeps "latest source" rolling)
 #   * Manually (workflow_dispatch, `version` input) → build any upstream
 #     tag/commit and push <version>.
 #
-# Platforms: linux/amd64 by default (native, fast in CI). arm64 is opt-in — the
-# `include_arm64` dispatch input or repo variable INCLUDE_ARM64=1 — and is a
-# QEMU-emulated cross-build, which is slow: emulated node costs ~10-17s PER pnpm
-# metadata request, so a cold arm64 run is ~1h. (Dockerfile step ordering/cache
-# details for warm runs are documented in the recipe's README "Cache hygiene".)
+# NATIVE multi-arch: two matrix jobs build linux/amd64 (ubuntu-latest) and
+# linux/arm64 (ubuntu-24.04-arm hosted ARM runner) natively — no QEMU, so the
+# arm64 leg is as fast as amd64 (QEMU cross-building once cost ~1 h of emulated
+# pnpm/tsc on a cold run). Each platform pushes a per-arch intermediate tag
+# (`<version>-<arch>`); the `merge` job joins them into the final multi-arch
+# manifest with `docker buildx imagetools create`.
 name: docker-publish
 
 on:
@@ -27,22 +28,24 @@ on:
         description: 'Upstream dsh version/tag to build (default: upstream default branch)'
         required: false
         default: ''
-      include_arm64:
-        description: 'Also build linux/arm64 (QEMU-emulated; slow). Defaults to the INCLUDE_ARM64 repo variable, else amd64 only.'
-        type: boolean
-        required: false
-        default: false
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    # Long builds are the multi-arch case only; bound it so a job can never
-    # sit for hours (QEMU arm64 cold build ~1h is the ceiling that matters).
-    timeout-minutes: 150
+  build:
+    name: build (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     steps:
       - name: Checkout this repo (recipe + build scripts)
         uses: actions/checkout@v4
@@ -87,24 +90,7 @@ jobs:
       - name: Stage the build context
         run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
 
-      - name: Resolve platforms
-        id: platforms
-        run: |
-          WANT=""
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            WANT="${{ inputs.include_arm64 }}"
-          elif [ -n "${{ vars.INCLUDE_ARM64 }}" ]; then
-            WANT="${{ vars.INCLUDE_ARM64 }}"
-          fi
-          if [ "$WANT" = "true" ] || [ "$WANT" = "1" ]; then
-            echo "platforms=linux/amd64,linux/arm64" | tee -a "$GITHUB_OUTPUT"
-          else
-            echo "platforms=linux/amd64" | tee -a "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set up QEMU (arm64 cross-build only)
-        if: contains(steps.platforms.outputs.platforms, 'arm64')
-        uses: docker/setup-qemu-action@v3
+      # Native per-arch builds — no QEMU setup needed on either runner.
       - uses: docker/setup-buildx-action@v3
 
       - name: Log in to GHCR
@@ -119,40 +105,33 @@ jobs:
         run: |
           # GHCR refs must be all-lowercase; github.repository keeps the owner's
           # case (e.g. AndreasSeidl/dsh-docker -> andreasseidl/dsh-docker), so
-          # derive the image name via bash's @L lowercase expansion.
+          # derive it via bash's @L lowercase expansion.
           IMG="ghcr.io/${GITHUB_REPOSITORY@L}"
           echo "image=$IMG" | tee -a "$GITHUB_OUTPUT"
           VERSION="${{ steps.version.outputs.version }}"
-          if [ -n "$VERSION" ]; then
-            # Full image refs: a bare "0.1.1-rc.2" would push to docker.io/library
-            echo "tags=$IMG:$VERSION,$IMG:latest" | tee -a "$GITHUB_OUTPUT"
-          else
-            echo "tags=$IMG:nightly" | tee -a "$GITHUB_OUTPUT"
-          fi
+          TARGET="$VERSION"
+          [ -n "$TARGET" ] || TARGET="nightly"
+          echo "target=$TARGET" | tee -a "$GITHUB_OUTPUT"
+          # Per-arch intermediate tag; the merge job joins these into the final
+          # manifest. Bare refs would push to docker.io/library, so always full.
+          echo "perarch_tags=$IMG:$TARGET-${{ matrix.arch }}" | tee -a "$GITHUB_OUTPUT"
 
-      - name: Build and push
+      - name: Build and push (linux/${{ matrix.arch }})
         uses: docker/build-push-action@v6
         with:
           context: .docker-context
-          platforms: ${{ steps.platforms.outputs.platforms }}
+          platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          # Warm-cache plumbing (keeps repeated/CI builds from being cold):
-          #   * type=gha — GitHub Actions cache backend. SELF-MANAGING: GitHub
-          #     caps it per repo (~10 GB for public repos) and evicts LRU and
-          #     7-day-stale entries, so it cannot grow without bound the way a
-          #     local BuildKit store can. mode=max stores intermediate layers so
-          #     the builder stages (~90% of the compile cost) are reused, not
-          #     just the final runtime image.
-          #   * The registry buildcache (`<image>:buildcache`) that this workflow
-          #     previously exported is intentionally gone: it is additive and has
-          #     NO automatic size eviction, so it accumulated cache blobs on GHCR
-          #     unboundedly — the registry analogue of a 100 GB local build cache.
-          #     gha alone keeps builds warm within GitHub's enforced cache budget.
-          cache-from: |
-            type=gha
-          cache-to: |
-            type=gha,mode=max
+          tags: ${{ steps.tags.outputs.perarch_tags }}
+          # Warm-cache plumbing. type=gha is SELF-MANAGING: GitHub caps it per
+          # repo (~10 GB for public repos) and evicts LRU / 7-day-stale entries,
+          # so it cannot grow without bound. Per-arch scope keeps amd64/arm64
+          # caches independent. mode=max stores intermediate layers so the
+          # builder stages (~90% of the compile cost) are reused. No registry
+          # buildcache: it is additive with no size eviction (the unbounded
+          # analogue of a 100 GB local build cache) — see README "Cache hygiene".
+          cache-from: type=gha,scope=dsh-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=dsh-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -160,3 +139,52 @@ jobs:
             org.opencontainers.image.description=DeepSeek Harness (dsh web) container
           build-args: |
             DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}
+
+  merge:
+    name: merge multi-arch manifest
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image and target
+        id: meta
+        run: |
+          IMG="ghcr.io/${GITHUB_REPOSITORY@L}"
+          VERSION=""
+          if [ "${{ github.event_name }}" = "push" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/}"
+            VERSION="${VERSION#v}"
+          elif [ -n "${{ inputs.version }}" ]; then
+            VERSION="${{ inputs.version }}"
+          fi
+          TARGET="$VERSION"
+          [ -n "$TARGET" ] || TARGET="nightly"
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+
+      - name: Create combined multi-arch manifest
+        env:
+          IMG: ${{ steps.meta.outputs.image }}
+          TARGET: ${{ steps.meta.outputs.target }}
+        run: |
+          set -euo pipefail
+          ARCH_TAGS=""
+          for a in amd64 arm64; do
+            if docker buildx imagetools inspect "$IMG:$TARGET-$a" >/dev/null 2>&1; then
+              ARCH_TAGS="$ARCH_TAGS $IMG:$TARGET-$a"
+            else
+              echo "warning: missing $IMG:$TARGET-$a — skipping"
+            fi
+          done
+          [ -n "$ARCH_TAGS" ] || { echo "no per-arch images to merge" >&2; exit 1; }
+          FINAL_TAGS="-t $IMG:$TARGET"
+          [ "$TARGET" = "nightly" ] || FINAL_TAGS="$FINAL_TAGS -t $IMG:latest"
+          docker buildx imagetools create $FINAL_TAGS $ARCH_TAGS
+          echo "published $IMG:$TARGET (${TARGET#latest} tags set)"

@@ -326,21 +326,22 @@ pushes to GHCR:
   `ghcr.io/<owner>/dsh-docker:nightly`;
 - **manually** — `workflow_dispatch` accepts a `version` (tag or commit) input.
 
-`linux/amd64` is built and pushed by default. `linux/arm64` is opt-in: pass the
-`include_arm64` dispatch input or set the repo variable `INCLUDE_ARM64=1`; it is
-QEMU-emulated, which is slow (a cold arm64 run is ~1 h — emulated node costs
-~10–17 s per pnpm metadata request), so the everyday release stays amd64-only.
-A native multi-arch matrix (amd64 + arm64 on separate hosted runners, merged
-with `buildx imagetools`) is planned once the single-arch path is green and its
-caching is confirmed. Tags in the recipe repo and harness versions map 1:1
-(`v`-prefix optional).
+`linux/amd64` and `linux/arm64` are both built and pushed, **natively**: a two-
+job matrix (`ubuntu-latest` for amd64, the `ubuntu-24.04-arm` hosted ARM runner
+for arm64) builds each platform in parallel — no QEMU — and a `merge` job joins
+them into one multi-arch manifest with `docker buildx imagetools create`
+(published under `<version>`/`latest`, or `nightly`). The per-arch intermediate
+tags (`<version>-amd64`, `<version>-arm64`) also remain on GHCR. Earlier
+versions cross-built arm64 with QEMU, which is ~1 h cold and made the arm64 leg
+look stuck; native building removed that. Tags in the recipe repo and harness
+versions map 1:1 (`v`-prefix optional).
 
 CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
-`mode=max` so the builder stages stay warm between runs. It is
-*self-managing*: GitHub caps it per repository (~10 GB on public repos) and
-evicts LRU / 7-day-stale entries, so it cannot grow without bound. Note that
-the cache is only seeded by a **successful** run — a run that dies during push
-or build aborts the cache export, so the next build starts cold. Earlier
+`mode=max` and a per-arch `scope` so the builder stages stay warm between runs.
+It is *self-managing*: GitHub caps it per repository (~10 GB on public repos)
+and evicts LRU / 7-day-stale entries, so it cannot grow without bound. Note
+that the cache is only seeded by a **successful** run — a run that dies during
+push or build aborts the cache export, so the next build starts cold. Earlier
 versions also exported a `type=registry` cache tagged `<image>:buildcache` on
 GHCR — that one is **additive with no automatic size eviction** and would have
 accumulated cache blobs on GHCR indefinitely (the registry analogue of the
