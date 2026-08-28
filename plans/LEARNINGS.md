@@ -395,3 +395,46 @@ overlay export (~2-6 s) + ~6 s of compile that must re-run (tsdown-host/vite)
 + BuildKit bookkeeping; anything "still feel slow" past ~25 s is the 246-project
 TS/typert compile itself, which the tier-3 dev profile (source mounted,
 build/HMR in a live container, no image per edit) is the real answer to.
+
+## Round 5 — CI multi-arch: QEMU was the real slowness; native ARM fixes it (2026-08-28)
+
+Sequence that got the pipeline green and the image into GHCR:
+
+1. **Fixed the four CI bugs in order**: bare-keyless `$GITHUB_OUTPUT` line
+   (step fails with a runner error), lowercase GHCR ref
+   (`${GITHUB_REPOSITORY@L}` in bash — no `lower()` in Actions expressions),
+   concurrent `build:lib:host & client & wait` race (client `tsc` imports
+   `@deepseek-ai/*/remote` emitted only by the serial HOST build — build order
+   must be serial), and bare tags (`0.1.1-rc.2` pushes to `docker.io/library`
+   → 401; fully-qualified `${IMG}:${VERSION},${IMG}:latest` required).
+2. **"Stuck" arm64 was real work, not a hang**: single multi-arch buildx job
+   puts arm64 under QEMU; emulated node costs ~10–17 s *per* pnpm metadata
+   request and 1011 packages means a ~30–60 min emulated install; BuildKit
+   gives each platform its own pnpm/tscache mount so amd64's warm store never
+   helps arm64. The user-canceled run actually COMPLETED after the cancel
+   (built arm64, pushed a multi-arch manifest) — being canceled is not the
+   only reason a run "did nothing visible".
+3. **The real fix is native builds, not patience**: switch to a matrix of
+   `ubuntu-latest` (amd64) + `ubuntu-24.04-arm` (hosted ARM runner) building
+   each platform natively, then `docker buildx imagetools create` to merge
+   the per-arch intermediate tags (`<ver>-amd64`, `<ver>-arm64`) into
+   `<ver>` + `latest` (+ `nightly` on schedule). Cold native ≈ 9 min, warm
+   ≈ 7 min, versus ~1 h+ under QEMU.
+4. **Caching reality (why a "warm" run is STILL ~7 min)**: gha `mode=max`
+   reuses the Docker builder layers, so install/compile steps don't re-execute
+   — but every run pays fixed non-cacheable costs: provisioning + checkout
+   (incl. upstream harness + 150 MB context tar) ~1–2 min, gha cache
+   restore (multi-GB over the network) ~1–2 min, graph resolution + cache-mount
+   hydration, and export/push of both platforms (~300 MB each) + attestations
+   ~2 min. So warm saves only the ~2-minute crunch; the pipeline is
+   I/O-dominated once compile is cached. Mode=max still matters (without it,
+   only the final stage would be cached), and per-arch gha `scope`
+   (`dsh-amd64`/`dsh-arm64`) keeps caches independent. Beware: changing cache
+   `scope` invalidates previous caches on the next run (one cold run, then
+   warm again). Registry `type=registry` buildcache stays removed (additive,
+   unbounded).
+5. **Monitoring without the rate-limited API**: GHCR registry itself is the
+   ground truth and is not rate-limited — `docker manifest inspect` /
+   `ghcr.io/v2/.../tags/list`. Registry pollers detected per-arch pushes and
+   the merged multi-arch manifest live. `api.github.com` (60/hr unauth) is
+   only needed for per-step durations and cache byte-sizes.
