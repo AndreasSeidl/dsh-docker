@@ -27,11 +27,12 @@ on:
   workflow_dispatch:
 
 env:
-  # Content bytes (docker image inspect {{.Size}}). The post-purge image is
-  # ~322.7 MB; the regression was ~553 MB. This ceiling is generous enough for
-  # legit growth but far below the failure mode it guards. Raise it only as a
-  # deliberate, documented decision.
-  SIZE_CEILING_BYTES: '400000000'
+  # Bytes of the /app tree (du -sb /app, measured inside the image — immune to
+  # layer-import/remote-cache size reporting). Fixed image: ~455 MB; if the
+  # agent-CLI purge silently stops matching, this jumps to ~1015 MB. 650 MB is
+  # comfortable headroom for legitimate growth yet far below the failure mode.
+  # Raise it only as a deliberate, documented decision.
+  SIZE_CEILING_BYTES: '650000000'
 
 jobs:
   guard:
@@ -117,10 +118,12 @@ jobs:
         env:
           CEILING: ${{ env.SIZE_CEILING_BYTES }}
         run: |
-          SIZE_BYTES="$(docker image inspect dsh-hygiene:check --format '{{.Size}}')"
-          echo "image content: ${SIZE_BYTES} B (ceiling ${CEILING} B)"
-          if [ "$SIZE_BYTES" -gt "$CEILING" ]; then
-            echo "Image grew to ${SIZE_BYTES} B — over the ${CEILING} B ceiling." >&2
+          # du -sb /app inside the image: deterministic, independent of how the
+          # image was loaded/cached on this runner.
+          APP_BYTES="$(docker run --rm --entrypoint /bin/sh dsh-hygiene:check -c 'du -sb /app | cut -f1')"
+          echo "app tree: ${APP_BYTES} B (ceiling ${CEILING} B)"
+          if [ -z "$APP_BYTES" ] || [ "$APP_BYTES" -gt "$CEILING" ]; then
+            echo "App tree is ${APP_BYTES:-unknown} B — over the ${CEILING} B ceiling." >&2
             echo "Find what was pulled in, or raise the ceiling deliberately in" >&2
             echo ".github/workflows/image-hygiene.yml." >&2
             exit 1
