@@ -321,9 +321,9 @@ pushes to GHCR:
 
 - **on every tag** — `git tag v0.1.1-rc.2` (or `0.1.1-rc.2`) pins the harness
   at that upstream version and publishes
-  `ghcr.io/<owner>/dsh-container:<version>` and `:latest`;
+  `ghcr.io/<owner>/dsh-docker:<version>` and `:latest`;
 - **weekly (Mon 03:30 UTC)** — rebuilds the upstream default branch as
-  `ghcr.io/<owner>/dsh-container:nightly`;
+  `ghcr.io/<owner>/dsh-docker:nightly`;
 - **manually** — `workflow_dispatch` accepts a `version` (tag or commit) input.
 
 Both `linux/amd64` and `linux/arm64` are built and pushed. Tags in the recipe
