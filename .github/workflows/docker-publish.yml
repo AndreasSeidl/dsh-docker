@@ -2,10 +2,10 @@
 #
 #   * On a git TAG (e.g. `v0.1.1-rc.2` or `0.1.1-rc.2`) → build the harness at
 #     that upstream version and push
-#       ghcr.io/<owner>/dsh-container:<version>
-#       ghcr.io/<owner>/dsh-container:latest
+#       ghcr.io/<owner>/dsh-docker:<version>
+#       ghcr.io/<owner>/dsh-docker:latest
 #   * Every Monday 03:30 UTC → build the upstream default branch and push
-#       ghcr.io/<owner>/dsh-container:nightly   (keeps "latest source" rolling)
+#       ghcr.io/<owner>/dsh-docker:nightly   (keeps "latest source" rolling)
 #   * Manually (workflow_dispatch, `version` input) → build any upstream
 #     tag/commit and push <version>.
 #
@@ -28,9 +28,6 @@ on:
 permissions:
   contents: read
   packages: write
-
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build-and-push:
@@ -90,9 +87,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image tags
+      - name: Compute image and tags
         id: tags
         run: |
+          # GHCR refs must be all-lowercase; github.repository keeps the owner's
+          # case (e.g. AndreasSeidl/dsh-docker -> andreasseidl/dsh-docker), so
+          # derive the image name via bash's @L lowercase expansion.
+          echo "image=ghcr.io/${GITHUB_REPOSITORY@L}" | tee -a "$GITHUB_OUTPUT"
           VERSION="${{ steps.version.outputs.version }}"
           if [ -n "$VERSION" ]; then
             echo "tags=$VERSION,latest" | tee -a "$GITHUB_OUTPUT"
@@ -116,10 +117,10 @@ jobs:
           # the compile cost) are reused, not just the final runtime image.
           cache-from: |
             type=gha
-            type=registry,ref=${{ env.IMAGE }}:buildcache
+            type=registry,ref=${{ steps.tags.outputs.image }}:buildcache
           cache-to: |
             type=gha,mode=max
-            type=registry,mode=max,ref=${{ env.IMAGE }}:buildcache
+            type=registry,mode=max,ref=${{ steps.tags.outputs.image }}:buildcache
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
