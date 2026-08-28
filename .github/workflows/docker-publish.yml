@@ -9,8 +9,11 @@
 #   * Manually (workflow_dispatch, `version` input) → build any upstream
 #     tag/commit and push <version>.
 #
-# Multi-arch: linux/amd64 + linux/arm64 (QEMU-emulated cross-build; the builder
-# carries a C toolchain so native addons compile when a prebuild is missing).
+# Platforms: linux/amd64 by default (native, fast in CI). arm64 is opt-in — the
+# `include_arm64` dispatch input or repo variable INCLUDE_ARM64=1 — and is a
+# QEMU-emulated cross-build, which is slow: emulated node costs ~10-17s PER pnpm
+# metadata request, so a cold arm64 run is ~1h. (Dockerfile step ordering/cache
+# details for warm runs are documented in the recipe's README "Cache hygiene".)
 name: docker-publish
 
 on:
@@ -24,6 +27,11 @@ on:
         description: 'Upstream dsh version/tag to build (default: upstream default branch)'
         required: false
         default: ''
+      include_arm64:
+        description: 'Also build linux/arm64 (QEMU-emulated; slow). Defaults to the INCLUDE_ARM64 repo variable, else amd64 only.'
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -32,6 +40,9 @@ permissions:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    # Long builds are the multi-arch case only; bound it so a job can never
+    # sit for hours (QEMU arm64 cold build ~1h is the ceiling that matters).
+    timeout-minutes: 150
     steps:
       - name: Checkout this repo (recipe + build scripts)
         uses: actions/checkout@v4
@@ -76,7 +87,23 @@ jobs:
       - name: Stage the build context
         run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
 
-      - name: Set up buildx + QEMU
+      - name: Resolve platforms
+        id: platforms
+        run: |
+          WANT=""
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WANT="${{ inputs.include_arm64 }}"
+          elif [ -n "${{ vars.INCLUDE_ARM64 }}" ]; then
+            WANT="${{ vars.INCLUDE_ARM64 }}"
+          fi
+          if [ "$WANT" = "true" ] || [ "$WANT" = "1" ]; then
+            echo "platforms=linux/amd64,linux/arm64" | tee -a "$GITHUB_OUTPUT"
+          else
+            echo "platforms=linux/amd64" | tee -a "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up QEMU (arm64 cross-build only)
+        if: contains(steps.platforms.outputs.platforms, 'arm64')
         uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
@@ -107,7 +134,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .docker-context
-          platforms: linux/amd64,linux/arm64
+          platforms: ${{ steps.platforms.outputs.platforms }}
           push: true
           tags: ${{ steps.tags.outputs.tags }}
           # Warm-cache plumbing (keeps repeated/CI builds from being cold):
