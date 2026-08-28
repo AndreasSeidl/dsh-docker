@@ -1,7 +1,13 @@
-# DeepSeek Harness container — convenience compose wiring.
+# DeepSeek Harness container — convenient compose wiring.
 #
-#   docker compose up -d --build      # requires `make context` first
-#   open http://127.0.0.1:3080
+#   docker compose up -d        # pulls the published GHCR image and runs the
+#   open http://127.0.0.1:3080  # hardened stack (volumes + reverse proxy)
+#
+# The image is published to GHCR; this file deploys it, so there is no build
+# step by default. Pin a specific release with DSH_TAG, e.g.
+#   DSH_TAG=0.1.1-rc.2 docker compose up -d
+# To run YOUR locally built image instead (e.g. after `make build`):
+#   DSH_IMAGE=dsh:dev docker compose up -d --no-build
 #
 # Network: the GUI is reachable on every host interface by default (set
 # DSH_WEB_PUBLISH_HOST=127.0.0.1 to restrict to the host). There is NO
@@ -21,13 +27,7 @@
 
 services:
   dsh:
-    build:
-      # Requires `make context` first: this directory is the staged build
-      # context (a pruned copy of the harness source + Dockerfile + helpers).
-      context: .docker-context
-      args:
-        DSH_CLIENT_COMMIT_HASH: ${DSH_COMMIT:-b150a55}
-    image: dsh:dev
+    image: ${DSH_IMAGE:-ghcr.io/andreasseidl/dsh-docker:${DSH_TAG:-latest}}
     container_name: dsh
     ports:
       - "${DSH_WEB_PUBLISH_HOST:-0.0.0.0}:${DSH_WEB_PORT:-3080}:${DSH_WEB_PORT:-3080}"

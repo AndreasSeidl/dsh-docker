@@ -10,8 +10,9 @@
 #   * cap_drop ALL + no-new-privileges + a pids cap are applied;
 #   * the web GUI is reachable through the published port (proxy mode).
 #
-# Uses `--no-build` and the built image so this script does not rebuild; run
-# `make context` + `docker build` first (or `make build`).
+# The compose file defaults to the published GHCR image, so this script forces
+# it onto the LOCAL build via DSH_IMAGE=$IMAGE with `--no-build` (nothing is
+# rebuilt/pulled); run `make build` first.
 #
 # The stack is brought up on DSH_WEB_PORT (default 3082) to avoid colliding
 # with anything already on 3080, then torn down (volumes removed).
@@ -39,7 +40,7 @@ fi
 
 if docker inspect "$IMAGE" >/dev/null 2>&1; then
   echo "== hardened compose boot (proxy mode, ports $PORT) =="
-  DSH_WEB_PORT="$PORT" docker compose up -d --no-build >/dev/null 2>&1 \
+  DSH_WEB_PORT="$PORT" DSH_IMAGE="$IMAGE" docker compose up -d --no-build >/dev/null 2>&1 \
     || { fail "docker compose up"; exit 1; }
 
   # wait for the healthcheck to report healthy
