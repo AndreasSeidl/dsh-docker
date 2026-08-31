@@ -2,24 +2,27 @@
 #
 # The harness's directory-picker seam ships `-auto`, which resolves at boot
 # whether to mount the OS chooser (`native`, needs the host display + zenity/
-# kdialog) or the in-app browser (`browse`, listing + create over HTTP).
-#
-# On a server no operator can ever reach a host display, so we PIN `browse`
-# here: the "Select Workspace Directory" dialog becomes the in-app file
-# browser, which works for remote clients (it is a normal HTTP dialog — list,
-# browse, type a path, create a folder — with no native component at all). It
-# is also what `-auto` would resolve to in this headless image; pinning makes
-# it deterministic and keeps a later image change (e.g. a shipped desktop
-# picker) from ever opening a dialog on an unattended server.
+# kdialog) or the in-app browser (`browse`, listing + create over HTTP). The
+# in-app browser is the right choice for a server: it is a normal HTTP dialog
+# (list, browse, type a path, create a folder) with no native component, so
+# remote clients can use it and nothing ever opens on an unattended display.
 #
 # The patch engine refuses to change a row's package `name` (a row's module
 # identity is structural), so this layer disables the stock `-auto` row and
-# mounts the `-browse` backend as a new row instead. Its browser half loads
-# automatically (the seam's one-row-swaps-both-faces rule). This file was
-# written by the container entrypoint because DSH_SERVER_MODE=1; delete it (or
-# edit it) to change the behavior.
+# mounts the `-browse` interaction as new rows instead. IMPORTANT: the picker
+# has TWO faces, and BOTH must be mounted as rows — the HOST backend
+# (`directory-picker-browse`) AND its CLIENT surface
+# (`ui-directory-picker-browse`). The `-auto` row composes the pair itself;
+# pinning only the backend leaves the client flow holes empty, so with no
+# workspaces the GUI offers no add/select affordance at all (the "no workspace
+# picker" bug; see the harness's own reference overlay
+# apps/web/tests/pin-browse-picker.overlay.yml, which mounts both rows). This
+# file was written by the container entrypoint because DSH_SERVER_MODE=1;
+# delete it (or edit it) to change the behavior.
 - id: directory-picker
   disabled: true
 - insert:
     - id: directory-picker-browse
       name: '@deepseek-ai/dsh-host-directory-picker-browse'
+    - id: ui-directory-picker-browse
+      name: '@deepseek-ai/dsh-client-ui-directory-picker-browse'

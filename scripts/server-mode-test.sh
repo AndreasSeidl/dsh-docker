@@ -137,6 +137,17 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   else
     fail "composed web profile does not show directory-picker-browse (dump-config)"
   fi
+  # The picker has TWO faces that both must be mounted as rows: the host
+  # backend AND the ui-directory-picker-browse client surface (the -auto row
+  # composes the pair itself; a lone backend row leaves the client flow holes
+  # empty, so with no workspaces the GUI offers no picker at all). Guard the
+  # client row explicitly — it is what makes the picker actually work.
+  if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
+       | grep -q '@deepseek-ai/dsh-client-ui-directory-picker-browse'; then
+    pass "composed web profile mounts the ui-directory-picker-browse client surface (picker usable)"
+  else
+    fail "composed web profile does not mount the ui-directory-picker-browse client surface (dump-config)"
+  fi
   if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
        | grep -A2 '^- id: directory-picker$' | grep -q 'disabled: true'; then
     pass "stock directory-picker-auto row is disabled in the composed profile"
