@@ -431,8 +431,10 @@ jobs:
 
           for v in $VERSIONS; do
             # --- 1) merge ---
-            DAMD="$(cat "$v__amd64.digest" 2>/dev/null || true)"
-            DARM="$(cat "$v__arm64.digest" 2>/dev/null || true)"
+            # NB: `${v}` braces are required — `$v__amd64` would name a single
+            # variable called v__amd64 (bash: `_` is a valid name char).
+            DAMD="$(cat "${v}__amd64.digest" 2>/dev/null || true)"
+            DARM="$(cat "${v}__arm64.digest" 2>/dev/null || true)"
             [ -n "$DAMD" ] && [ -n "$DARM" ] \
               || { echo "error: missing amd64/arm64 digests for $v" >&2; exit 1; }
             REFS="$IMG@sha256:$DAMD $IMG@sha256:$DARM"
