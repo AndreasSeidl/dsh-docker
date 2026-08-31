@@ -102,17 +102,20 @@ releases are ever published (under `<version>`, with `:latest` aliasing the
 newest one). A plain "rolling default branch" build is never pushed.
 
 **Nothing user-facing is published until the new image passes the test suite.**
-The two per-arch builds land on GHCR as *untagged* owner digests; a `test` job
-then runs the full suite (`scripts/smoke-test.sh`, `server-mode-test.sh`,
-`compose-test.sh`, `trust-proxy-test.sh`) against the raw amd64 digest — the
-same tests run locally. Any single FAIL aborts the run, so the `merge` job
-(which creates the `<version>`/`latest` tags) only ever runs on a green image.
-A new upstream release with a breaking change therefore fails here and nothing
-is tagged, instead of shipping a broken image to GHCR. To reproduce the gate
-locally, run the four suites against a digest ref:
+The two per-arch builds land on GHCR as *untagged* owner digests; a matrix
+`test` job then runs the full suite (`scripts/smoke-test.sh`,
+`server-mode-test.sh`, `compose-test.sh`, `trust-proxy-test.sh`) **natively on
+each arch** — amd64 on the x64 runner, arm64 on the hosted ARM runner — against
+its raw digest, the same tests run locally. Any single FAIL on either leg
+aborts the run, so the `merge` job (which creates the `<version>`/`latest`
+tags) only ever runs on a green image. A new upstream release with a breaking
+change therefore fails here and nothing is tagged, instead of shipping a
+broken image to GHCR. To reproduce the gate locally, run the four suites
+against a digest ref:
 
 ```sh
-# The amd64 leg of the new release (arm64 cannot execute on an amd64 runner).
+# The leg you want to exercise: amd64 on an x64 host/runner; arm64 needs an
+# arm64 host (or the hosted ARM runner the test matrix uses).
 DGP="$(docker buildx imagetools inspect ghcr.io/<owner>/dsh-docker:<version> \
        | grep -B2 'Platform:  linux/amd64' | grep '^  Name:' \
        | sed -E 's/.*@(sha256:[0-9a-f]{64})/\1/')"
