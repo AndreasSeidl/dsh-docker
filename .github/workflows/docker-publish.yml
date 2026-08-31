@@ -22,11 +22,14 @@
 # (amd64 on ubuntu-latest, arm64 on the ubuntu-24.04-arm hosted ARM runner)
 # each push their per-arch image to GHCR **BY DIGEST with no tag**
 # (`outputs: type=image,name=…,push-by-digest=true,name-canonical=true`) and
-# upload the digest as a tiny artifact. The `merge` job downloads both digests
-# and creates the published multi-arch index from the raw digests (`docker
-# buildx imagetools create …  ghcr.io/…@sha256:…`), tags `<version>` + `latest`,
-# then VERIFIES the result (both platform manifests reachable + the amd64 leg
-# runs).
+# upload the digest as a tiny artifact. A `test` job then runs the FULL repo
+# test suite (scripts/*-test.sh) against the raw amd64 digest BEFORE anything
+# is tagged — any single FAIL aborts the run, so a broken image is never
+# tagged or published. Only then does the `merge` job download both digests
+# and create the published multi-arch index from the raw digests (`docker
+# buildx imagetools create …  ghcr.io/…@sha256:…`), tag `<version>` + `latest`,
+# and VERIFY the result (both platform manifests reachable + the amd64 leg
+# runs and reports a version at/above the floor).
 #
 # Because the per-arch owners are pushed WITHOUT a tag, they stay **untagged**
 # versions on GHCR — searchable by digest, never shown among tagged releases —
@@ -230,9 +233,75 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  # Gate between build and publish: run the repo's full test suite against the
+  # exact amd64 build output (the untagged owner digest) BEFORE `merge` tags
+  # anything. A breaking change upstream that fails even one check therefore
+  # aborts here and nothing reaches ghcr as a user-facing tag.
+  test:
+    name: test amd64 image (pre-publish gate)
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout this repo (tests + compose files + floor)
+        uses: actions/checkout@v4
+
+      - name: Download amd64 digest
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-linux-amd64
+          merge-multiple: true
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image and amd64 digest ref
+        id: meta
+        run: |
+          # The artifact file name IS the bare sha256 hex of the amd64 owner.
+          IMG="ghcr.io/${GITHUB_REPOSITORY@L}"
+          D="$(ls -A /tmp/digests 2>/dev/null | head -n1)"
+          [ -n "$D" ] || { echo "error: no amd64 digest found" >&2; exit 1; }
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+          echo "digest=sha256:$D" >> "$GITHUB_OUTPUT"
+          echo "  testing $IMG@sha256:$D"
+
+      # The suites branch on `docker inspect "$DSH_IMAGE"` and `docker exec`, so
+      # the digest must be present locally before the first check.
+      - name: Pull the build output (amd64) by digest
+        run: docker pull "${{ steps.meta.outputs.image }}@${{ steps.meta.outputs.digest }}"
+
+      # The whole point of this job: the image about to be tagged must first
+      # pass the same suites we run locally. Each exits nonzero on any FAIL;
+      # with `set -e` the step (and therefore the run) aborts. The suites exit 0
+      # "skipping" only for images below the supported floor, which the build
+      # job already refuses to build — so a consequential skip is impossible
+      # and a skip is never treated as a pass anyway.
+      - name: Run the full test suite against the build output
+        env:
+          DSH_IMAGE: ${{ steps.meta.outputs.image }}@${{ steps.meta.outputs.digest }}
+        run: |
+          set -euo pipefail
+          echo "== smoke =="
+          ./scripts/smoke-test.sh
+          echo "== server-mode =="
+          ./scripts/server-mode-test.sh
+          echo "== compose =="
+          ./scripts/compose-test.sh
+          echo "== trust-proxy =="
+          ./scripts/trust-proxy-test.sh
+          echo "=== ALL FOUR SUITES PASSED ($DSH_IMAGE) — safe to tag and publish ==="
+
   merge:
     name: merge multi-arch manifest (verify)
-    needs: build
+    needs:
+      - build
+      - test
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
