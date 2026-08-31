@@ -100,6 +100,10 @@ jobs:
 
       - name: Resolve version(s) to build
         id: version
+        # GITHUB_TOKEN is NOT auto-exported as an env var into steps; map it
+        # explicitly so the GHCR tag-listing below can authenticate.
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' .supported-version 2>/dev/null | tr -d '[:space:]' || true)"
@@ -116,7 +120,7 @@ jobs:
             # The container recipe (Dockerfile + bundled proxy + entrypoint) is
             # the same for every version, so a fix there lands on all of them.
             IMG_PATH="${GITHUB_REPOSITORY@L}"
-            TOKEN="$(curl -fsS -u "$GITHUB_ACTOR:$GITHUB_TOKEN" \
+            TOKEN="$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" \
                         "https://ghcr.io/token?scope=repository:${IMG_PATH}:pull" \
                         | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)"
             [ -n "$TOKEN" ] || { echo "error: 'all' — could not get a GHCR token to list tags" >&2; exit 1; }
