@@ -63,13 +63,24 @@ had.
 
 `linux/amd64` and `linux/arm64` are both built and pushed **natively**: a two-job
 matrix (`ubuntu-latest` for amd64, the `ubuntu-24.04-arm` hosted ARM runner for
-arm64) builds each platform in parallel — no QEMU — under a throwaway hash-like
-tag `sha256-<md5(run-id-arch)[0:12]>` (an obvious build artifact, not a
-release), and a `merge` job joins them into the published multi-arch index
-(`<version>` + `latest`) with `docker buildx imagetools create`. The merge job
-then **verifies** the published tags actually resolve (both platform manifests
-reachable) and that the amd64 leg runs. Tags in the recipe repo and harness
-versions map 1:1 (`v`-prefix optional).
+arm64) builds each platform in parallel — no QEMU — and pushes each per-arch
+image to GHCR **by digest with no tag** (`docker/build-push-action` with
+`outputs: type=image,…,push-by-digest=true,name-canonical=true`), uploading the
+digest as a tiny artifact. A `merge` job downloads both digests and creates the
+published multi-arch index from the raw digest references
+(`docker buildx imagetools create … ghcr.io/…@sha256:…`), tags it `<version>` +
+`latest`, then **verifies** the published tags actually resolve (both platform
+manifests reachable) and that the amd64 leg runs. Tags in the recipe repo and
+harness versions map 1:1 (`v`-prefix optional).
+
+> **Attribution.** The native push-by-digest + digest-artifact + merge-by-digest
+> skeleton is adapted from
+> [sredevopsorg/multi-arch-docker-github-workflow](https://github.com/sredevopsorg/multi-arch-docker-github-workflow)
+> (MIT License, Copyright (c) 2025 SREDevOps.org). We keep our own version
+> resolution, the post-merge verification, minimal `packages: write`
+> permissions, and the *never version-delete* rule; their builder-context setup
+> (`docker context create builders` + `endpoint:`) is not needed on the runners
+> this repo uses.
 
 CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
 `mode=max` and a per-arch `scope` so the builder stages stay warm between runs.
@@ -97,27 +108,26 @@ occasional cold start when the 7-day TTL evicts the cache first is fine.
 > tags. And don't pin by one of their digests — a digest like
 > `sha256:380f67a3…` is the attestation stub, not a runnable image.
 
-### Why the owners keep their tags and are never deleted
+### Why the per-arch owners are untagged, and never deleted
 
-A draft of this pipeline deleted the throwaway per-arch versions right after
-merging. GHCR's version deletion is **not reference-aware**: deleting a
-per-arch "owner" version removes the platform manifest the freshly created
-multi-arch index still points at, so `docker pull` of the published tag fails
-with `manifest … not found`. That is exactly what happened to `0.1.2-alpha.2` /
-`:latest` (published on the first run where that cleanup actually executed);
-`0.1.1-rc.2` and `0.1.2-alpha.1` survived only because their owners were never
-deleted. Two controlled experiments on real GHCR then established the boundary:
-**GHCR exposes no tag-removal API at all** — the registry `DELETE` endpoint
-answers `405 UNSUPPORTED` (so neither the OCI tag-delete API nor `regctl tag
-rm`'s dummy-manifest fallback can work), and the only REST primitive deletes a
-whole *version*, which is precisely the destructive operation above. There is
-therefore no supported way to hide or remove owner rows while keeping their
-content. Consequently this pipeline leaves the `sha256-*` owners permanently
-tagged — hash-named so they read as build artifacts and are never mistaken for
-releases, and excluded from the poller's release detection — while the merge
-job's verify step guards that the published tag itself is real. The per-release
-owner rows accumulate permanently; that is the price of native multi-arch on
-GHCR.
+A draft of this pipeline pushed the per-arch images under throwaway tags and
+deleted those versions right after merging. GHCR's version deletion is
+**not reference-aware**: deleting a per-arch "owner" version removes the
+platform manifest the freshly created multi-arch index still points at, so
+`docker pull` of the published tag fails with `manifest … not found`. That is
+exactly what happened to `0.1.2-alpha.2` / `:latest` (published on the first
+run where that cleanup actually executed); `0.1.1-rc.2` and `0.1.2-alpha.1`
+survived only because their owners were never deleted. Two controlled
+experiments on real GHCR then established the boundary: **GHCR exposes no
+tag-removal API at all** — the registry `DELETE` endpoint answers
+`405 UNSUPPORTED`, and the only REST primitive deletes a whole *version*, which
+is precisely the destructive operation above. So this pipeline *pushes* the
+owners **without any tag in the first place** (`push-by-digest`): they exist as
+untagged, content-addressed versions — searchable by digest, never shown among
+tagged releases — and nothing ever deletes them. The per-release owner rows
+accumulate permanently as untagged "sha256:…" rows in the GHCR Versions view;
+that is the intrinsic price of native multi-arch on GHCR, and the merge job's
+verify step guards that each published tag is real.
 
 ## Making a release
 

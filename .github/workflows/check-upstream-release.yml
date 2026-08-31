@@ -79,9 +79,10 @@ jobs:
               print("false")
           else:
               tags = json.load(open("tags.json")).get("tags", [])
-              # Real versions only. `latest`, `nightly`, and the throwaway
-              # per-arch build tags (`sha256-*` today, `dsh-int-*`/`nightly`
-              # from older pipelines) are NOT versions.
+              # Real versions only. `latest` is an alias; `nightly` and the
+              # sha256-*/dsh-int-*/<arch> rows were throwaway tags from older
+              # pipelines (owners are pushed untagged today, so none of these
+              # appear anymore) — defensively, none of them are versions.
               garbage = {"latest", "nightly"}
               versions = {t for t in tags
                           if t not in garbage

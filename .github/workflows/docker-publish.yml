@@ -16,30 +16,26 @@
 # * Reusable (workflow_call, `version` input) -> called by the hourly
 #   check-upstream-release workflow when a newer upstream release appears.
 #
-# NATIVE multi-arch: two matrix jobs build linux/amd64 (ubuntu-latest) and
-# linux/arm64 (ubuntu-24.04-arm hosted ARM runner) natively — no QEMU, so the
-# arm64 leg is as fast as amd64. Each platform is pushed under a throwaway
-# hash-like tag `sha256-<md5(run-id-arch)[0:12]>` (an obvious build artifact,
-# NOT a release), which the `merge` job recomputes deterministically — no
-# matrix output plumbing. The merge job then joins them with
-# `docker buildx imagetools create` into the multi-arch index published as
-# `<version>` + `latest`, and VERIFIES the published tags actually resolve
-# (both platform manifests reachable) and that the image runs (`docker run`
-# the amd64 leg).
+# Native multi-arch (no QEMU) — structure adapted from
+# sredevopsorg/multi-arch-docker-github-workflow (MIT, (c) 2025 SREDevOps.org;
+# see also the "Attribution" note in CONTRIBUTING): a matrix of two builds
+# (amd64 on ubuntu-latest, arm64 on the ubuntu-24.04-arm hosted ARM runner)
+# each push their per-arch image to GHCR **BY DIGEST with no tag**
+# (`outputs: type=image,name=…,push-by-digest=true,name-canonical=true`) and
+# upload the digest as a tiny artifact. The `merge` job downloads both digests
+# and creates the published multi-arch index from the raw digests (`docker
+# buildx imagetools create …  ghcr.io/…@sha256:…`), tags `<version>` + `latest`,
+# then VERIFIES the result (both platform manifests reachable + the amd64 leg
+# runs).
 #
-# The `sha256-*` owner versions are the long-term "owners" of the platform
-# content the merged index references, and are kept forever — so the published
-# tag can never break. They cannot even be hidden by untagging: GHCR has NO
-# tag-removal API (registry DELETE is 405 UNSUPPORTED; the REST API only
-# deletes whole versions) — established empirically by the now-retired
-# verify-prune-safety experiment, which found `regctl tag rm` cannot work on
-# GHCR either. Version-deleting an owner is therefore the ONLY removal path,
-# and it is destructive: GHCR's version deletion is not reference-aware and
-# removes the platform manifest the merged index points at, leaving
+# Because the per-arch owners are pushed WITHOUT a tag, they stay **untagged**
+# versions on GHCR — searchable by digest, never shown among tagged releases —
+# so there are no throwaway tags anywhere. They still must NEVER be
+# version-deleted: GHCR's version deletion is not reference-aware and removes
+# the platform manifest the merged index points at, leaving
 # `<version>`/`latest` un-pullable (`manifest not found`, seen on
-# 0.1.2-alpha.2 / `:latest`). So the owners stay permanently tagged, named
-# `sha256-*` so they read as build artifacts — never conflated with releases —
-# and check-upstream-release ignores them.
+# 0.1.2-alpha.2 / `:latest`). The untagged owner rows accumulate per release;
+# that is the intrinsic price of native multi-arch on GHCR.
 name: docker-publish
 
 on:
@@ -65,6 +61,12 @@ on:
 permissions:
   contents: read
   packages: write
+
+concurrency:
+  # One publish at a time per ref; a newer trigger cancels the in-flight one so
+  # parallel dispatches/poll ticks cannot race the same tags on GHCR.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
@@ -143,6 +145,9 @@ jobs:
       - name: Stage the build context
         run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
 
+      - name: Prepare platform pair name (for artifact naming)
+        run: echo "PLATFORM_PAIR=linux-${{ matrix.arch }}" >> "$GITHUB_ENV"
+
       # Native per-arch builds — no QEMU setup needed on either runner.
       - uses: docker/setup-buildx-action@v3
 
@@ -153,31 +158,24 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image and tags
-        id: tags
+      - name: Compute image name
+        id: image
         run: |
           # GHCR refs must be all-lowercase; github.repository keeps the owner's
           # case (e.g. AndreasSeidl/dsh-docker -> andreasseidl/dsh-docker), so
           # derive it via bash's @L lowercase expansion.
-          IMG="ghcr.io/${GITHUB_REPOSITORY@L}"
-          echo "image=$IMG" | tee -a "$GITHUB_OUTPUT"
-          # Throwaway per-arch tag. Its hash-like name (md5 of run-id + arch,
-          # first 12 hex chars) makes it read as a build artifact, never a
-          # release — so nobody mistakes `sha256-*` rows for published versions.
-          # The merge job recomputes the exact same names, so it needs no
-          # matrix-output plumbing. These versions are the "owners" of the
-          # platform content the merged multi-arch index references: they must
-          # outlive the merge (they are pruned only much later, see the header).
-          H="$(printf '%s-%s' "${{ github.run_id }}" "${{ matrix.arch }}" | md5sum | cut -c1-12)"
-          echo "throwaway=$IMG:sha256-$H" | tee -a "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY@L}" | tee -a "$GITHUB_OUTPUT"
 
-      - name: Build and push (linux/${{ matrix.arch }})
+      - name: Build and push by digest (linux/${{ matrix.arch }})
+        id: build
         uses: docker/build-push-action@v6
         with:
           context: .docker-context
           platforms: linux/${{ matrix.arch }}
-          push: true
-          tags: ${{ steps.tags.outputs.throwaway }}
+          # push by DIGEST with NO tag: the per-arch image lands on GHCR as an
+          # untagged, content-addressed version (searchable by digest, never
+          # shown among tagged releases). The merge job joins the raw digests.
+          outputs: type=image,name=${{ steps.image.outputs.image }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
           # Warm-cache plumbing. type=gha is SELF-MANAGING: GitHub caps it per
           # repo (~10 GB for public repos) and evicts LRU / 7-day-stale entries,
           # so it cannot grow without bound. Per-arch scope keeps amd64/arm64
@@ -203,12 +201,36 @@ jobs:
           build-args: |
             DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}
 
+      - name: Export digest
+        run: |
+          # One empty file per built image, named by its digest — uploaded and
+          # re-globbed in the merge job so the two digests cross the job
+          # boundary without matrix-output plumbing.
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
   merge:
-    name: merge multi-arch manifest (verify + delayed prune)
+    name: merge multi-arch manifest (verify)
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
       - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
@@ -233,31 +255,31 @@ jobs:
           TARGET: ${{ steps.meta.outputs.target }}
         run: |
           set -u
+          shopt -s nullglob
 
           # --- 1) merge ---
-          # Re-discover the two throwaway per-arch images by recomputing the
-          # deterministic names the build matrix used (md5 of run-id + arch).
-          RID="${{ github.run_id }}"
-          ARCH_TAGS=""
-          for a in amd64 arm64; do
-            H="$(printf '%s-%s' "$RID" "$a" | md5sum | cut -c1-12)"
-            REF="$IMG:sha256-$H"
-            if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
-              ARCH_TAGS="$ARCH_TAGS $REF"
-              echo "found $REF"
-            else
-              echo "warning: missing $REF — skipping"
-            fi
-          done
-          [ -n "$ARCH_TAGS" ] || { echo "no per-arch images to merge" >&2; exit 1; }
+          # Reassemble the per-arch images from the digests the build job
+          # uploaded (file names are the bare sha256 hex digests).
+          cd /tmp/digests
+          files=(*)
+          [ "${#files[@]}" -gt 0 ] || { echo "no per-arch digests found" >&2; exit 1; }
+          REFS=""
+          for d in "${files[@]}"; do REFS="$REFS $IMG@sha256:$d"; done
+          echo "merging:$REFS"
           # Every publish is a real (versioned) release; `latest` aliases the
-          # newest one. Neither is ever "nightly".
-          FINAL_TAGS="-t $IMG:$TARGET -t $IMG:latest"
-          docker buildx imagetools create $FINAL_TAGS $ARCH_TAGS \
+          # newest one. Neither is ever "nightly". Index annotations mirror the
+          # reference workflow's provenance niceties.
+          docker buildx imagetools create \
+            -t "$IMG:$TARGET" -t "$IMG:latest" \
+            --annotation 'index:org.opencontainers.image.description=DeepSeek Harness (dsh web) container' \
+            --annotation "index:org.opencontainers.image.created=$(date -u +'%Y-%m-%dT%H:%M:%SZ')" \
+            --annotation "index:org.opencontainers.image.url=${{ github.server_url }}/${{ github.repository }}" \
+            --annotation "index:org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}" \
+            $REFS \
             || { echo "merge failed" >&2; exit 1; }
           echo "published $IMG:$TARGET + $IMG:latest"
 
-          # --- 2) verify BEFORE touching the owner rows ---
+          # --- 2) verify the published tags resolve to real content ---
           # Resolve every platform manifest the fresh index references. This is
           # exactly the check that would have caught the 0.1.2-alpha.2 failure
           # (index present, platform content gone). `--verbose` forces docker
@@ -268,6 +290,12 @@ jobs:
               || { echo "FATAL: $REF references unreachable platform content" >&2; exit 1; }
             echo "  $REF: both platform manifests reachable"
           done
+          echo "== verifying per-arch digests are present =="
+          for d in "${files[@]}"; do
+            docker manifest inspect --verbose "$IMG@sha256:$d" >/dev/null 2>&1 \
+              || { echo "FATAL: owner digest sha256:$d unreachable" >&2; exit 1; }
+            echo "  sha256:$d reachable"
+          done
           # Full smoke on the host architecture — the same path `docker compose
           # up` takes. (arm64 can't *execute* on an amd64 runner, but its
           # manifest was just verified reachable above.)
@@ -275,9 +303,7 @@ jobs:
             || { echo "FATAL: published image does not run" >&2; exit 1; }
           echo "  verified: $IMG:$TARGET pulls and runs (amd64)"
 
-          # The `sha256-*` owner versions backing this tag are intentionally
-          # left in place (tagged) forever: GHCR has no tag-removal API, and
-          # version-deleting an owner breaks this freshly published tag (see
-          # the file header). They are hash-named so they read as build
-          # artifacts and are excluded from release detection.
-          echo "published $IMG:$TARGET + $IMG:latest (owners kept as sha256-* tags)"
+          # The untagged per-arch owners backing this tag are left in place
+          # forever: GHCR has no tag-removal API, and version-deleting an owner
+          # breaks this freshly published tag (see the file header).
+          echo "published $IMG:$TARGET + $IMG:latest (owners kept as untagged digests)"
