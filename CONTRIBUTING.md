@@ -31,6 +31,43 @@ Follow the commit style already in the log: `feat:`, `fix:`, `docs:`, `ci:`,
 `TESTING.md`. Releases are driven purely by git tags (below) — no separate
 release branch juggling.
 
+## Supported version floor
+
+`.supported-version` in the repo root (see [.supported-version](.supported-version))
+is the single source of truth for the oldest upstream harness version this repo
+guarantees support for — the minimum supported version. It is read by:
+
+- the **test suites** (`scripts/{smoke,compose,server-mode,trust-proxy}-test.sh`):
+  a version at or above the floor must pass **every** check with **zero**
+  era-SKIPs (a SKIP firing on a supported image fails the run); anything below
+  the floor runs the era-gated substitution (SKIP lines) and is treated as
+  legacy — no longer guaranteed;
+- the **publish workflow** (`docker-publish.yml`): it refuses to build/publish
+  an upstream version below the floor, and asserts the published image reports
+  a version at or above it.
+
+**Always make the trade-off when fixing:** when you change behavior or add a
+feature, decide explicitly whether old versions should keep passing. If
+back-porting to a version below the floor isn't worth it — bump the floor. Do
+**not** accumulate permanent backwards-compatibility gates for versions nobody
+still runs; the floor is the statement "we no longer maintain that". Bumping
+the floor never deletes anything from GHCR (owners stay as untagged digests
+forever — see below); it only redefines which versions the tests and CI hold
+to the full contract.
+
+**Set the floor to something reasonable:** prefer the current release, or the
+oldest version you are honestly willing to keep passing every check — never so
+low that era-gates multiply for releases you don't care about, and never so
+high that the current release itself goes unsupported. When a new version
+passes everything and ships, consider bumping the floor to it and dropping the
+era-gates for everything below (the suites keep SKIP-logging legacy versions
+until then).
+
+The feature→version thresholds that back the era-gates live in the same
+scripts (session lock + WS relay: 0.1.2-alpha.1; trust-proxy + server-profile
+seeding + session-lock-compatible healthcheck: 0.1.2-alpha.2). When you raise
+the floor, adjust or remove any threshold that is now at or below it.
+
 ## CI & publishing (`docker-publish` workflow)
 
 `.github/workflows/docker-publish.yml` builds and pushes to GHCR:

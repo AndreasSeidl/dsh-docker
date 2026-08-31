@@ -107,7 +107,19 @@ jobs:
             echo "note: no version given - resolved newest upstream release: ${VERSION:-<none>}"
           fi
           [ -n "$VERSION" ] || { echo "error: could not resolve an upstream version to build" >&2; exit 1; }
+          # Supported-version floor (see .supported-version / CONTRIBUTING.md):
+          # refuse to publish any upstream version below it, so fixes and
+          # features never have to be backwards-compatible with older releases.
+          MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' .supported-version 2>/dev/null | tr -d '[:space:]' || true)"
+          [ -n "$MIN_SUPPORTED" ] || { echo "error: .supported-version missing or unreadable" >&2; exit 1; }
+          if [ "$(printf '%s\n%s\n' "$VERSION" "$MIN_SUPPORTED" | sort -V | tail -n1)" = "$VERSION" ]; then
+            echo "version $VERSION >= supported floor $MIN_SUPPORTED"
+          else
+            echo "error: refusing to publish $VERSION (below the supported floor $MIN_SUPPORTED)" >&2
+            exit 1
+          fi
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "min_supported=$MIN_SUPPORTED" >> "$GITHUB_OUTPUT"
 
       - name: Resolve upstream ref
         id: upstream
@@ -224,6 +236,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
+      - name: Checkout this repo (supported-version floor)
+        uses: actions/checkout@v4
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
@@ -298,10 +313,17 @@ jobs:
           done
           # Full smoke on the host architecture — the same path `docker compose
           # up` takes. (arm64 can't *execute* on an amd64 runner, but its
-          # manifest was just verified reachable above.)
-          docker run --rm --platform linux/amd64 "$IMG:$TARGET" --version >/dev/null \
-            || { echo "FATAL: published image does not run" >&2; exit 1; }
-          echo "  verified: $IMG:$TARGET pulls and runs (amd64)"
+          # manifest was just verified reachable above.) Also assert the image
+          # reports a harness version at or above the supported floor.
+          BOT="$(docker run --rm --platform linux/amd64 "$IMG:$TARGET" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+          [ -n "$BOT" ] || { echo "FATAL: published image does not run / report a version" >&2; exit 1; }
+          MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' .supported-version 2>/dev/null | tr -d '[:space:]' || true)"
+          if [ "$(printf '%s\n%s\n' "$BOT" "$MIN_SUPPORTED" | sort -V | tail -n1)" = "$BOT" ]; then
+            echo "  verified: $IMG:$TARGET pulls/runs (amd64), reports $BOT >= floor ${MIN_SUPPORTED:-<missing>}"
+          else
+            echo "FATAL: published image reports $BOT, below the supported floor $MIN_SUPPORTED" >&2
+            exit 1
+          fi
 
           # The untagged per-arch owners backing this tag are left in place
           # forever: GHCR has no tag-removal API, and version-deleting an owner

@@ -34,11 +34,23 @@ FAILED=0
 HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
 : "${HARNESS_VER:?cannot read '$IMAGE' --version}"
 version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' ./.supported-version 2>/dev/null | tr -d '[:space:]' || true)"
+: "${MIN_SUPPORTED:?missing ./.supported-version — run the tests from the repo root}"
+SUPPORTED=no; version_ge "$HARNESS_VER" "$MIN_SUPPORTED" && SUPPORTED=yes
 SESSION_LOCK=no;   version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
 HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
 HEALTH_OK=no; [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ] && HEALTH_OK=yes
-skip() { echo "SKIP: $*"; }
-echo "  image $IMAGE → harness $HARNESS_VER (session lock: $SESSION_LOCK, era healthcheck ok: $HEALTH_OK)"
+# Legacy-era accommodations below the supported floor are SKIPped; at or above
+# the floor a skip firing is a bug (a supported image must pass every strict
+# check, and the era gates therefore must never trigger for it).
+skip() {
+  if [ "$SUPPORTED" = "yes" ]; then
+    fail "era skip fired on a supported image (floor $MIN_SUPPORTED): $*"
+  else
+    echo "SKIP: $*"
+  fi
+}
+echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED → $SUPPORTED; session lock: $SESSION_LOCK, era healthcheck ok: $HEALTH_OK)"
 
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
