@@ -31,6 +31,10 @@ permissions:
   contents: read
   # Resolving the `uses:` reusable workflow requires actions read permission.
   actions: read
+  # The callee (docker-publish) pushes to GHCR and requests `packages: write`;
+  # a reusable call is capped at the CALLER's permissions, so they must be
+  # granted here too or GitHub rejects the workflow as invalid.
+  packages: write
 
 jobs:
   check:
