@@ -69,9 +69,9 @@ release), and a `merge` job joins them into the published multi-arch index
 (`<version>` + `latest`) with `docker buildx imagetools create`. The merge job
 then **verifies** the published tags actually resolve (both platform manifests
 reachable, and the amd64 leg runs) and **untags** the per-arch owner tags with
-`crane`, keeping the versions — so the tag overview shows only `<version>` +
-`latest` while the published tag can never break. Tags in the recipe repo and
-harness versions map 1:1 (`v`-prefix optional).
+`regctl tag rm`, keeping the versions — so the tag overview shows only
+`<version>` + `latest` while the published tag can never break. Tags in the
+recipe repo and harness versions map 1:1 (`v`-prefix optional).
 
 CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
 `mode=max` and a per-arch `scope` so the builder stages stay warm between runs.

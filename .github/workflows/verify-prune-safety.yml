@@ -11,8 +11,8 @@
 # (whose owners were UNTAGGED but never version-deleted) still pull fine.
 #
 # This workflow answers, on real GHCR with the repo's GITHUB_TOKEN:
-#   TEST A — untag the owners (`crane untag`, version + content remain): does
-#            the merged tag stay pullable? (Expected: YES.)
+#   TEST A — tag-delete the owners (`regctl tag rm`, version + content remain):
+#            does the merged tag stay pullable? (Expected: YES.)
 #   TEST B — version-delete the owners (REST `DELETE /versions/{id}`): does the
 #            merged tag stay pullable? (Expected: NO — reproduces alpha.2.)
 # plus a final snapshot of the package's versions (tagged vs untagged).
@@ -46,14 +46,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Install crane (for untag)
+      - name: Install regctl (tag-delete tool)
         run: |
-          curl -fsSL -m 60 \
-            "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
-            -o /tmp/crane.tgz
-          tar xzf /tmp/crane.tgz crane
-          install -m 0755 crane /usr/local/bin/crane
-          crane version
+          curl -fsSL -m 60 -o /usr/local/bin/regctl \
+            "https://github.com/regclient/regclient/releases/latest/download/regctl-linux-amd64"
+          chmod +x /usr/local/bin/regctl
+          regctl version
 
       - name: Run the experiment
         env:
@@ -67,19 +65,24 @@ jobs:
           mkdir -p ctx && printf 'FROM alpine:3.20\n' > ctx/Dockerfile
 
           build_owners() {            # $1 = prefix (exp1/exp2)
-            docker buildx build --platform linux/amd64 --push -t "$IMG:$1-owner-amd64-$RID" ctx
-            docker buildx build --platform linux/arm64 --push -t "$IMG:$1-owner-arm64-$RID" ctx
+            docker buildx build --provenance=false --sbom=false \
+              --platform linux/amd64 --push -t "$IMG:$1-owner-amd64-$RID" ctx
+            docker buildx build --provenance=false --sbom=false \
+              --platform linux/arm64 --push -t "$IMG:$1-owner-arm64-$RID" ctx
             docker buildx imagetools create -t "$IMG:$1-$RID" \
               "$IMG:$1-owner-amd64-$RID" "$IMG:$1-owner-arm64-$RID"
           }
           reachable() { docker manifest inspect --verbose "$1" >/dev/null 2>&1; }
 
           # ---- TEST A: untag owners (keep versions/content) ----
-          echo "===== TEST A: untag owners ====="
+          echo "===== TEST A: tag-delete owners (regctl tag rm) ====="
           build_owners exp1
           echo "A baseline:"; reachable "$IMG:exp1-$RID" && echo "  merged tag resolves (baseline OK)"
-          crane untag "$IMG:exp1-owner-amd64-$RID"
-          crane untag "$IMG:exp1-owner-arm64-$RID"
+          # regctl tag rm keeps the manifest/content (safe-untag semantics); if
+          # GHCR lacks the OCI tag-delete API regctl pushes a dummy manifest and
+          # deletes that by digest instead, never the real image.
+          regctl tag rm "$IMG:exp1-owner-amd64-$RID"
+          regctl tag rm "$IMG:exp1-owner-arm64-$RID"
           echo "A exp1-* tags still listed:"; \
             curl -fsS -m 20 "https://ghcr.io/token?scope=repository:${PKG@L}:pull" \
               | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' > "$RID.tok"

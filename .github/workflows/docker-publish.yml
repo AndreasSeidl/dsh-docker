@@ -26,10 +26,11 @@
 #      index published as `<version>` + `latest`;
 #   2. VERIFIES the published tags actually resolve (both platform manifests
 #      reachable) and that the image runs (`docker run` the amd64 leg);
-#   3. UNTAGS the per-arch owner tags with `crane` — the owner versions (and
-#      all their content) are KEPT, only the readable `sha256-*` tags go, so
-#      the tag overview shows just `<version>` + `latest` and the published
-#      tag can never break. After untagging it re-verifies the tag once more.
+#   3. UNTAGS the per-arch owner tags with `regctl tag rm` — the owner
+#      versions (and all their content) are KEPT, only the readable `sha256-*`
+#      tags go, so the tag overview shows just `<version>` + `latest` and the
+#      published tag can never break. After untagging it re-verifies the tag
+#      once more.
 #
 # Why the owners are untagged and NEVER version-deleted: GHCR's version
 # deletion is not reference-aware — deleting a per-arch "owner" version removes
@@ -217,13 +218,12 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - name: Install crane (untag tool)
+      - name: Install regctl (tag-delete tool)
         run: |
-          curl -fsSL -m 60 \
-            "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
-            -o /tmp/crane.tgz
-          tar xzf /tmp/crane.tgz crane
-          install -m 0755 crane /usr/local/bin/crane
+          curl -fsSL -m 60 -o /usr/local/bin/regctl \
+            "https://github.com/regclient/regclient/releases/latest/download/regctl-linux-amd64"
+          chmod +x /usr/local/bin/regctl
+          regctl version
 
       - name: Compute image and target
         id: meta
@@ -282,24 +282,27 @@ jobs:
             || { echo "FATAL: published image does not run" >&2; exit 1; }
           echo "  verified: $IMG:$TARGET pulls and runs (amd64)"
 
-          # --- 3) untag the per-arch owner tags (KEEP the versions/content) ---
+          # --- 3) tag-delete the per-arch owner tags (KEEP the versions/content) ---
           # The per-arch versions are the long-term "owners" of the platform
           # content the merged index references. They must NEVER be
           # version-deleted: GHCR's version deletion is not reference-aware and
           # removes the platform manifests the index points at, breaking the
           # published tag — that is exactly the 0.1.2-alpha.2 incident (see
-          # verify-prune-safety.yml / CONTRIBUTING). Untagging removes only the
-          # readable `sha256-*` tag: the version row and ALL its content remain
-          # (digit-searchable), the tag overview stays clean (only `<version>`
-          # and `latest` are tagged), and the published tag can never break.
-          # Best-effort: a failed untag just leaves a sha256-* tag lying around
-          # (harmless — it reads as a build artifact, never a release).
-          echo "== untagging owner tags (keep versions) =="
+          # verify-prune-safety.yml / CONTRIBUTING). `regctl tag rm` removes
+          # only the readable `sha256-*` tag (on registries without the OCI
+          # tag-delete API regctl pushes a throwaway dummy manifest and deletes
+          # that by digest instead, never the real image): the version row and
+          # ALL its content remain (digest-searchable), the tag overview stays
+          # clean (only `<version>` and `latest` are tagged), and the published
+          # tag can never break. Best-effort: a failed tag-delete just leaves a
+          # sha256-* tag behind (harmless — it reads as a build artifact, never
+          # a release).
+          echo "== tag-deleting owner tags (keep versions) =="
           for a in amd64 arm64; do
             H="$(printf '%s-%s' "$RID" "$a" | md5sum | cut -c1-12)"
             REF="$IMG:sha256-$H"
-            echo "  untag $REF"
-            crane untag "$REF" || echo "  warning: could not untag $REF (leaving the tag)"
+            echo "  regctl tag rm $REF"
+            regctl tag rm "$REF" || echo "  warning: could not tag-rm $REF (leaving the tag)"
           done
 
           # Final safety net: the merged tag must STILL resolve after untagging.
