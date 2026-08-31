@@ -368,9 +368,15 @@ filesystem is additionally read-only.
 <details>
 <summary><b>Picking a tag</b></summary>
 
-- **`:latest`** — the latest release. What you want to try it out.
+- **`:latest`** — the latest *published release*. What you want to try it out.
 - **`:<version>`** — a pinned release, e.g. `0.1.1-rc.2`. Pin this in production.
 - **`:nightly`** — a weekly rebuild of the harness's default branch.
+
+New upstream releases are picked up automatically: the container repo polls
+for upstream `dsh-v*` releases every hour and, when a newer one exists, builds
+and publishes both architectures under its version plus `:latest` — no manual
+tag push needed. With a pinned `:<version>` you stay on exactly that release
+until you choose to bump it.
 
 ```sh
 DSH_TAG=0.1.1-rc.2 docker compose up -d
