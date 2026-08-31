@@ -22,6 +22,59 @@ Settings page and you're in.
 
 ---
 
+## Install — one line, or the manual Docker way
+
+There are two ways to get it running, and the **manual Docker Compose route
+below is the default, documented way**. The one-liner below is a convenience:
+it fetches the Compose files itself (into `~/.dsh-container`; override with
+`DSH_CONTAINER_DIR`) and runs the exact same installer.
+
+```sh
+# Local mode — this machine only; ~/.dsh for harness data, the folder you're
+# in as the workspace. (Running the one-liner with no arguments does this too.)
+curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \
+  | sh -s -- local
+
+# Server mode — persistent volumes + LAN access by default (see Server mode)
+curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \
+  | sh -s -- server
+```
+
+Manual routes: clone the repo and run `bash scripts/install.sh local | server`,
+or follow the plain `docker compose` / `docker run` steps under
+[Quick start](#quick-start) and [Server mode](#server-mode) below — Compose
+files are `docker-compose.yml` (local) and `docker-compose.server.yml` (server).
+
+---
+
+## Two ways to run it
+
+Everything is one Docker image; what differs is how the harness data and the
+workspaces are stored, and who can reach the GUI. There is an installer for
+each:
+
+| | **Local mode** (`bash scripts/install.sh local`) | **Server mode** (`bash scripts/install.sh server`) |
+|---|---|---|
+| What it's for | You, on this machine, running the GUI in Docker | A machine on your network that you reach from somewhere else |
+| Harness data (settings, credentials, history) | A **host directory** (default `~/.dsh` — shared with a native `dsh` install if you have one) | A **named volume** (`dsh-server-home`) |
+| Workspaces | A **host directory** (default the folder you run the installer from) | A **named volume** (`dsh-server-workspaces`) holding one directory per workspace, created in the GUI |
+| Published on | `127.0.0.1` — **this machine only** | `0.0.0.0` — **LAN by default** |
+| Compose file | `docker-compose.yml` | `docker-compose.server.yml` |
+
+Both run the same hardened container (read-only root filesystem, no
+capabilities, no privilege escalation). The GUI is always the same
+[session-locked web app](#first-run--the-session-locked-url); the differences
+are where your data lives and which interfaces accept connections.
+
+- **Local mode** is below under [Quick start](#quick-start).
+- **Server mode** and how workspace selection works there is its own section:
+  [Server mode](#server-mode).
+
+Both are on the published image, so there is no build step. `make install-local`
+and `make install-server` are aliases for the installer; `make help` lists them.
+
+---
+
 ## First run — the session-locked URL
 
 The harness locks the GUI behind a per-run session token (only someone who can
@@ -45,7 +98,46 @@ port you publish, so the printed URL points at the right place.
 
 ---
 
-## Quick start
+## Skip the session token (trust the layer in front)
+
+Once a **real access layer** stands in front of the GUI, the per-run token is
+redundant — its only job is gating "anyone who can reach the port". If that
+layer is a genuine boundary (a tsdproxy/Tailscale ACL in front on the tailnet,
+a TLS + Basic Auth reverse proxy, a VPN, or plain loopback), you can drop the
+token entirely so clients get a clean, stable URL with no 401/token dance:
+
+```sh
+DSH_WEB_AUTH_MODE=trust-proxy
+```
+
+In this mode the bundled reverse proxy does the token exchange itself (once at
+boot, again if a 30-day cookie ever expires) and replays the session cookie on
+every request — the printed `dsh web:` line carries no `?token=`, and any
+browser that can reach the proxy is in. That is the point: **the thing in front
+is the access control now**. This is exactly the setup for Tailscale +
+[tsdproxy](https://github.com/alcheckoverflow/tsdproxy) (expose the container on
+the tailnet, let the tailnet ACL + TLS be the boundary, set
+`DSH_PUBLIC_URL=https://<name>.<tailnet>.ts.net`).
+
+It is also a footgun: on a plain `0.0.0.0` publish (no such layer), `trust-proxy`
+hands the GUI to anyone who can reach the port — the default `token` keeps the
+lock, so prefer leaving it unless you know what is in front.
+
+---
+
+## Quick start (Local mode)
+
+This runs the GUI on **this machine only**. The scripts below are what
+**Local mode** means; the same image is also used for [Server mode](#server-mode).
+
+Fastest path (writes the `.env` for you — harness data in `~/.dsh`, the agent
+works in the current directory, GUI on `127.0.0.1`):
+
+```sh
+bash scripts/install.sh local
+```
+
+Or one of the manual routes:
 
 ### Option A — `docker run`
 
@@ -95,6 +187,118 @@ deletes the volumes and everything on them.
 
 ---
 
+## Server mode
+
+For a machine that runs persistently and is **reached from somewhere else** — a
+home server, a VPS, an office box. The harness data and the workspaces both
+live on **named volumes** (so they survive container recreation and reboots),
+and the GUI is **published on every interface by default** (`0.0.0.0`), because
+the whole point is remote access.
+
+```sh
+bash scripts/install.sh server
+# → creates .env.server (add your API key there), starts the stack, and tells
+#   you how to find the access URL
+```
+
+`docker-compose.server.yml` sets up one container (`dsh-server`) with two
+volumes and nothing else writable on the container's filesystem:
+
+| Mount in container | Volume | What lives there |
+|---|---|---|
+| `/home/dsh/.dsh` | `dsh-server-home` | everything persistent about the harness: `settings.yaml`, credentials, sessions/chat history, **the workspace registry** (which workspaces exist, renames, archives), `AGENTS.md`, plugins |
+| `/workspaces` | `dsh-server-workspaces` | the workspace **file trees** — one directory per workspace |
+
+### Workspace selection works over the wire
+
+You asked how the file browser behaves when the browser is somewhere else — the
+short answer is it already works, because the picker used in this image is not
+an OS dialog at all:
+
+- The harness has a *directory-picker* seam with three backends
+  (`-native` opens an OS chooser on the server's display, `-browse` is an
+  **in-app file browser**, and `-auto` picks one at boot). The container is
+  headless, so anything usable here is server-rendered HTTP: list a directory,
+  type a path, create a folder.
+- **Server mode pins `-browse` explicitly** via a `cordis.patch.yml` seeded
+  into the harness home on first boot. That makes the "Select Workspace
+  Directory" dialog a normal web dialog: it lists the server's `/workspaces`,
+  lets you type a full path or browse, and lets you create a folder — nothing
+  needs a display or a native helper, so a browser anywhere on the network can
+  use it. (A native dialog would be wrong here: it would try to open on the
+  server's own screen.)
+- The bootstrap also symlinks `/workspaces` into the home directory the dialog
+  starts in, so remote users land on the workspace root instead of having to
+  navigate to `/` first.
+
+So the [workspace-management workflow](#everyday-commands) — `Add workspace`,
+create a folder, rename, archive — is the same in-app flow whether you're on
+the same machine or on the network.
+
+### The workspace model
+
+Every workspace is **one subdirectory of `/workspaces`** (for example
+`/workspaces/acme-app`), created from the GUI and persisted on the
+`dsh-server-workspaces` volume. Opening a workspace starts a session whose
+working directory is that folder, and the harness's file sandbox
+(`workspace-write`, the web profile's default) confines each session's writes
+to **its own workspace** — so workspaces on one server do not share write
+access.
+
+The **workspace registry** (names, order, archives, which sessions belong to
+which workspace) and the **chat history** persist on the other volume
+(`dsh-server-home`), separate from the files. Backing up both volumes backs up
+the whole server.
+
+### Access, security, and the log
+
+- The GUI is offered on the network by default. There is **no login screen** —
+  this is the single most important fact about server mode.
+- The GUI is locked behind a **per-run session token** (this image family and
+  every newer harness build): the log's `dsh web:` line carries a fresh
+  `?token=...` (rotates each start), and until a browser exchanges it, `/` and
+  `/api` answer `401`. The exchange is a `303 + Set-Cookie`: the browser trades
+  the token once for a signed cookie (30 days, `HttpOnly`, `SameSite=Strict`).
+  On a remote client, replace `localhost` with the server's address
+  (`http://192.168.1.50:3080/?token=...`).
+- The token and the cookie are effectively a **shared password**: anyone who can
+  read the container log (or capture the token/cookie) can drive this agent and
+  read every workspace. The signing secret persists on the home volume, so a
+  container restart invalidates the *printed token* but not cookies already
+  issued — existing browsers keep working; only first-time joiners need the new
+  token. There is no per-user model and no way to revoke a cookie short of
+  resetting that volume.
+- The **publish address is the real boundary**: `0.0.0.0` means the port accepts
+  connections from anywhere that can reach this host. The token and cookie cross
+  the network **in cleartext on plain HTTP**, so a sniffer on the LAN can lift
+  either and replay it. Treat the log like a password store, publish on a
+  network you trust, and put **TLS / a reverse-proxy auth layer in front**
+  (Authelia, basic auth, a VPN) before exposing it beyond that — the bundled
+  proxy is the documented insertion point for exactly that.
+- **Make the token URL clickable from another machine**: without help, the
+  container prints the token URL as `http://localhost:3080/?token=...`, and a
+  remote user who opens it unchanged ends up on *their own* localhost. Set
+  `DSH_PUBLIC_URL` (e.g. `http://192.168.1.50:3080`, or `https://harness.example`
+  once TLS is in front) in `.env.server` and the printed URL carries that
+  origin — nothing to hand-edit. The proxy also sends `Referrer-Policy:
+  no-referrer` on every page, so the token never leaks through the `Referer`
+  header the page would otherwise send to third-party resources.
+- Defaults: `DSH_BIND_ADDRESS` is `0.0.0.0` here (set it to `127.0.0.1` to lock
+  it back to the server itself), and `DSH_WEB_PORT` is `3080`.
+
+### Everyday server commands
+
+| I want to… | Command |
+|---|---|
+| see the access URL | `docker compose -f docker-compose.server.yml logs dsh-server \| grep 'dsh web:'` |
+| add your provider key | edit `.env.server`, then `docker compose -f docker-compose.server.yml --env-file .env.server up -d` |
+| stop (data kept) | `docker compose -f docker-compose.server.yml down` |
+| fresh slate (⚠️ deletes everything) | `docker compose -f docker-compose.server.yml down -v` |
+| update the image | `bash scripts/install.sh update server` |
+| shell inside | `docker exec -it dsh-server bash` |
+
+---
+
 ## Work on your own code
 
 By default the agent works in a private Docker volume. To point it at a real
@@ -141,8 +345,11 @@ All of these are environment variables. With Compose, put them in `.env`
 | `DEEPSEEK_API_KEY` | — | Your provider key. Optional — you can enter it in the GUI instead. |
 | `DEEPSEEK_BASE_URL` | — | Point at a compatible endpoint instead of api.deepseek.com. |
 | `DSH_WEB_PORT` | `3080` | The port on **your** machine — it is what the startup banner prints. With Compose it also sets the `-p` mapping. With `docker run` you choose it in `-p <port>:3080`; add `-e DSH_WEB_PORT=<port>` so the banner matches. |
-| `DSH_BIND_ADDRESS` | `127.0.0.1` | *(Compose only)* The address the GUI is published on. The default means this machine only; **set it to `0.0.0.0` for LAN access**. |
-| `DSH_WORKSPACE_DIR` | volume | *(Compose only)* Host folder the agent works in, e.g. `./my-project`. |
+| `DSH_PUBLIC_URL` | — | *(Server mode)* Origin remote clients actually reach (e.g. `http://192.168.1.5:3080` or `https://harness.example`). When set, the printed tokenized "dsh web:" URL uses it instead of `http://localhost:DSH_WEB_PORT`, so the URL is clickable from another machine. |
+| `DSH_WEB_AUTH_MODE` | `token` | How the per-run session token is handled. `token` (default) keeps the app's `401`/token dance. `trust-proxy` makes the bundled proxy exchange the token itself — no 401, no token URL, the printed URL is clean. Set it **only** when a real access layer stands in front (tsdproxy/Tailscale, TLS+auth edge, VPN, loopback); on a plain `0.0.0.0` publish it opens the GUI to anyone who can reach the port. See [Skip the token](#skip-the-session-token-trust-the-layer-in-front). |
+| `DSH_BIND_ADDRESS` | `127.0.0.1` local / `0.0.0.0` server | The address the GUI is published on. Local mode default means this machine only; **server mode defaults to `0.0.0.0`** (see [Server mode](#server-mode)). |
+| `DSH_HOME_DIR` | volume | *(Local compose only)* Host folder for the harness data, e.g. `~/.dsh` to share with a native install. Server mode always uses the `dsh-server-home` volume. |
+| `DSH_WORKSPACE_DIR` | volume | *(Local compose only)* Host folder the agent works in, e.g. `./my-project`. Server mode always uses the `dsh-server-workspaces` volume at `/workspaces`. |
 | `DSH_TAG` | `latest` | *(Compose only)* Image version: `latest`, `nightly`, or a pinned release. |
 | `DSH_TELEMETRY_DISABLED` | — | Any non-empty value opts out of harness telemetry. |
 | `DSH_QUIET` | — | Silences the container's startup banner. |
@@ -163,16 +370,18 @@ See [all variables](#all-environment-variables) for the complete list.
 
 | I want to… | Command |
 |---|---|
-| see what it's doing | `docker logs -f dsh` |
-| get the access URL (session token) | `docker logs dsh \| grep 'dsh web:'` |
-| stop it (keeping data) | `docker stop dsh` / `docker compose down` |
-| start it again | `docker start dsh` / `docker compose up -d` |
-| update to the newest image | `docker compose pull && docker compose up -d` |
-| get a shell inside | `docker exec -it dsh bash` |
+| install/start Local mode | `bash scripts/install.sh local` (or `docker compose up -d`) |
+| install/start Server mode | `bash scripts/install.sh server` (or `docker compose -f docker-compose.server.yml --env-file .env.server up -d`) |
+| see what it's doing | `docker logs -f dsh` (local) / `docker logs -f dsh-server` (server) |
+| get the access URL (session token) | `docker logs dsh \| grep 'dsh web:'` (local) / `... dsh-server \| grep 'dsh web:'` (server) |
+| stop it (keeping data) | `docker stop dsh` / `docker compose down` (local) — server: `docker compose -f docker-compose.server.yml down` |
+| start it again | `docker start dsh` / `docker compose up -d` (local) — server: `... -f docker-compose.server.yml up -d` |
+| update to the newest image | `bash scripts/install.sh update` (pulls and restarts whatever is running) |
+| get a shell inside | `docker exec -it dsh bash` (local) / `docker exec -it dsh-server bash` (server) |
 | install a plugin | `docker exec -it dsh dsh plugin --profile web add <package>` |
 | run a one-shot task | `docker exec -it dsh dsh --profile headless "run the tests"` |
 | see container usage help | `docker run --rm ghcr.io/andreasseidl/dsh-docker:latest container-help` |
-| back up my data | `docker run --rm -v dsh-home:/data -v "$PWD":/out alpine tar czf /out/dsh-backup.tgz -C /data .` |
+| back up my data | local: `docker run --rm -v dsh-home:/data -v "$PWD":/out alpine tar czf /out/dsh-backup.tgz -C /data .` — server: same with `-v dsh-server-home:/data` and also `-v dsh-server-workspaces:/ws` for the workspace files |
 | start completely fresh | `docker compose down -v` (⚠️ deletes settings, history, and workspace) |
 
 ---
@@ -205,10 +414,12 @@ are persistent, and whether credentials are configured.
 
 ## Network access
 
-**By default nothing on your network can reach the GUI.** The port is published
-on `127.0.0.1`, so the kernel only ever accepts connections from the machine
-running Docker — a browser anywhere else doesn't get refused, it doesn't get a
-connection at all.
+**Local mode: by default nothing on your network can reach the GUI.** The port
+is published on `127.0.0.1`, so the kernel only ever accepts connections from
+the machine running Docker — a browser anywhere else doesn't get refused, it
+doesn't get a connection at all. **Server mode is the opposite by design**: its
+compose file publishes on `0.0.0.0` so the GUI is reachable from the network
+(see [Server mode](#server-mode) for what to do about that).
 
 **For LAN access, set `DSH_BIND_ADDRESS` to `0.0.0.0`** — that is the only
 value that opens it up, and it is a literal address, not an on/off flag:
@@ -299,6 +510,8 @@ untouched on its own loopback-only port.
 | Variable | Default | Maps to | Notes |
 |---|---|---|---|
 | `DSH_WEB_PORT` | `3080` | banner/display only | The host port you publish the GUI on, used by the startup banner. Inside the container the GUI is always on `3080`. |
+| `DSH_PUBLIC_URL` | — | printed ready URL | Origin remote clients actually reach (e.g. `http://192.168.1.5:3080` or `https://harness.example`); the printed "dsh web:" line carries it. |
+| `DSH_WEB_AUTH_MODE` | `token` | proxy auth handling | `trust-proxy` makes the bundled proxy exchange the per-run token itself (no 401/token dance). ONLY with a real access layer in front — see [Skip the session token](#skip-the-session-token-trust-the-layer-in-front). |
 | `DSH_WEB_NO_OPEN` | `1` | `dsh web --no-open` | Containers have no browser; set `0` to allow the browser-handoff path. |
 | `DSH_WEB_ARGS` | — | raw extra args | Must start with `-`; passed through to `dsh web` for exotic flags. |
 | `DSH_WORKSPACE` | `/workspace` | process cwd (default workspace) | The in-container path; back it with a volume. |
@@ -336,8 +549,9 @@ missing.
 
 | Path in container | What it is | Back it with |
 |---|---|---|
-| `/home/dsh/.dsh` | the harness home (`$DSH_HOME`): **all** persistent harness data | a named volume (`dsh-home`) or a host directory |
-| `/workspace` | the agent's **workspace** — the directory it reads and edits files in | a named volume (`dsh-workspace`) or a host bind mount of real code |
+| `/home/dsh/.dsh` | the harness home (`$DSH_HOME`): **all** persistent harness data | a named volume (`dsh-home` / `dsh-server-home`), a host directory (Local mode, `DSH_HOME_DIR`) |
+| `/workspace` | the agent's **workspace** — the directory it reads and edits files in (Local mode) | a named volume (`dsh-workspace`) or a host bind mount of real code |
+| `/workspaces` | the **workspace volume root** — every workspace is one subdirectory of it (Server mode) | a named volume (`dsh-server-workspaces`) |
 
 ```
 /home/dsh/.dsh/
@@ -356,7 +570,10 @@ missing.
 On first boot the image seeds an empty `$DSH_HOME` with a scaffold
 `settings.yaml` (empty, so stock defaults apply) and `AGENTS.md` (the
 user-global briefing the agent loads before every session), then
-auto-initializes the `web` profile. Existing files are never overwritten.
+auto-initializes the `web` profile. Existing files are never overwritten. In
+**server mode** a server-flavoured `AGENTS.md` and an extra `cordis.patch.yml`
+— which pins the web profile to the in-app directory browser (see
+[Server mode](#server-mode)) — are seeded as well.
 
 Inside the container the `dsh` user owns `/workspace`, `/home/dsh`, and the
 install at `/app`. Everything else is reachable only through volumes you mount,
@@ -473,6 +690,15 @@ beats ~100 MB of compressed size.
   uid can make `git` warn about "dubious ownership"; use
   `git -c safe.directory=/workspace ...` (with Compose, `$HOME` is read-only, so
   `git config --global` won't stick).
+- **Server mode has no per-workspace hard isolation boundary**. The file
+  sandbox (`workspace-write`) confines each session to its own workspace
+  directory, but the in-app browser and `workspace.create` accept arbitrary
+  paths, and the workspaces *harness home* is on the same machine — this is
+  scoping for one server you trust, not a multi-tenant security boundary (same
+  trust model as the log token itself). The browse dialog starts at the
+  harness home, not the workspace root, so operators may have to navigate to
+  `/workspaces`; the seeded `workspaces` symlink in the home directory makes
+  that a single click.
 - The macOS/Windows-only surfaces (PowerShell, native directory picker) are
   inert on Linux; `--no-open` is host-agnostic, so web mode behaves the same on
   Docker Desktop hosts.

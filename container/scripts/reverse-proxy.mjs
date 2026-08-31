@@ -48,13 +48,25 @@ const PUBLIC_PORT = PROXY_PORT
 
 // The port the GUI is published on from the USER's machine — the host side of
 // `-p <port>:3080`. The container cannot discover it, so it is told through
-// DSH_WEB_PORT. It exists so a clickable URL can be printed: `dsh web` 0.1.2+
-// locks the session behind a per-run token it prints only in its ready-URL
-// line, and that line must be rewritten to the public origin or the user can
-// never open the GUI. (Compose passes DSH_WEB_PORT through automatically;
-// `docker run` users set it to match their `-p <port>:3080`.)
+// DSH_WEB_PORT. It exists so a clickable URL can be printed: `dsh web` locks
+// the session behind a per-run token it prints only in its ready-URL line, and
+// that line must be rewritten to the public origin or the user can never open
+// the GUI. (Compose passes DSH_WEB_PORT through automatically; `docker run`
+// users set it to match their `-p <port>:3080`.)
 const PUBLIC_URL_PORT = Number(process.env.DSH_WEB_PORT || 3080)
-const PUBLIC_URL_BASE = `http://localhost:${PUBLIC_URL_PORT}`
+// The public origin the ready-URL line (and any Location: redirect back to the
+// app) is rewritten to. Default: the loopback origin for `localhost`.
+// DSH_PUBLIC_URL overrides it — for server mode point it at the address remote
+// clients actually reach, e.g. http://192.168.1.5:3080 or, behind a TLS proxy
+// in front, https://harness.example. ORIGIN ONLY (scheme://host[:port]), no
+// path prefix — the rewritten Location keeps the root path the app sent.
+const publicUrlEnv = String(process.env.DSH_PUBLIC_URL || '').trim().replace(/\/+$/, '')
+const PUBLIC_URL_BASE = publicUrlEnv || `http://localhost:${PUBLIC_URL_PORT}`
+const PUBLIC_URL_HOST = publicUrlEnv ? new URL(PUBLIC_URL_BASE).host : `localhost:${PUBLIC_URL_PORT}`
+// True only when the public origin spells out a port (http://host:port), which
+// the "(LAN: ...)" hint can then be repointed at. A port-less DSH_PUBLIC_URL
+// (an https:// origin in front of the GUI) means the hint has no correct port.
+const publicHostWithPort = /:\d+$/.test(PUBLIC_URL_HOST.replace(/^[^@]*@/, ''))
 
 // Who may reach the GUI is decided OUTSIDE the container, by the port mapping:
 // `-p 127.0.0.1:3080:3080` (the default) means the kernel only ever accepts
@@ -65,6 +77,78 @@ const PUBLIC_URL_BASE = `http://localhost:${PUBLIC_URL_PORT}`
 
 // There is deliberately NO Host allow-list: any client can claim any Host
 // header, so one would not be a boundary -- the published port mapping is.
+
+// ── DSH_WEB_AUTH_MODE: how the app's per-run session token is handled ──────
+//   token        (default) the app guards every request: an unauth GET / or
+//                /api answers 401 until the browser opens the printed
+//                "dsh web: ...?token=" URL and trades the token for a cookie.
+//                Safe anywhere, including a plain 0.0.0.0 publish.
+//   trust-proxy  the bundled proxy does that exchange itself and replays the
+//                resulting cookie on every forwarded request, so clients never
+//                see a 401 and the printed URL needs no ?token=. This is only
+//                sound when a REAL access layer stands in front of the proxy --
+//                a tsdproxy/Tailscale ACL, a TLS + auth edge, a VPN, or plain
+//                loopback. On a plain 0.0.0.0 publish it turns the GUI into an
+//                open agent; do not use it there.
+const TRUST_PROXY = String(process.env.DSH_WEB_AUTH_MODE || '').trim() === 'trust-proxy'
+
+// The launch token the app prints (rotates per boot) and the replayed cookie.
+// The cookie is authority-bound: remapHeaders always presents the CONSTANT
+// loopback authority to the app, so one cookie minted from one token is valid
+// for every client and every request (the app does not bind it to a browser,
+// IP, or device). trust-proxy exploits exactly that property.
+let launchToken = null
+let authCookie = null
+let resolveAuthReady = null
+const authReady = new Promise((resolve) => { resolveAuthReady = resolve })
+const waitAuth = () => (TRUST_PROXY && !authCookie ? authReady : Promise.resolve())
+
+// Vanilla GET /?token=... to the app, presented as the loopback authority. The
+// app answers 303 + Set-Cookie; keep the bare name=value (the browser-oriented
+// attributes are irrelevant once the proxy replays it). The exchange is not
+// single-use, so it can be repeated against the same boot token.
+function exchangeLaunchToken() {
+  return new Promise((resolve) => {
+    const req = httpRequest({
+      hostname: APP_HOST,
+      port: APP_PORT,
+      path: `/?token=${encodeURIComponent(launchToken)}`,
+      method: 'GET',
+      headers: { host: `${APP_HOST}:${APP_PORT}`, connection: 'close' },
+      agent: false,
+    }, (res) => {
+      const setCookies = res.headers['set-cookie'] || []
+      if (setCookies[0]) authCookie = String(setCookies[0]).split(';')[0]
+      res.resume()
+      resolve()
+    })
+    req.on('error', resolve)
+    req.end()
+  })
+}
+
+// Once the launch token is known (it arrives on the app's ready-URL line),
+// exchange it and unblock any requests that were waiting for it.
+function armTrustProxy() {
+  if (!TRUST_PROXY || authCookie || !launchToken) return
+  exchangeLaunchToken().finally(() => {
+    resolveAuthReady()
+    console.log('[dsh-proxy] DSH_WEB_AUTH_MODE=trust-proxy: session token exchanged; the GUI is now gated only by the layer in front of this proxy')
+  })
+}
+
+// Busybody note: trust-proxy removes the app's only gate. When the thing in
+// front is real access control (tsdproxy/Tailscale, TLS+auth, VPN) that is the
+// point; verify that layer exists before deploying this mode.
+
+// Add the replay cookie to outgoing headers, unless the client already sent one
+// with the same name -- theirs is just as valid and never conflicts.
+function withAuthCookie(headers) {
+  if (!TRUST_PROXY || !authCookie) return headers
+  const name = authCookie.slice(0, authCookie.indexOf('='))
+  if (headers.cookie && headers.cookie.includes(`${name}=`)) return headers
+  return { ...headers, cookie: headers.cookie ? `${headers.cookie}; ${authCookie}` : authCookie }
+}
 
 function remapHeaders(headers) {
   const out = { ...headers }
@@ -85,22 +169,37 @@ function writeHeadLike(res, status, headers) {
 }
 
 // ── HTTP ────────────────────────────────────────────────────────────────
-function forwardHttp(req, res) {
+function forwardHttp(req, res, retried = false) {
   const options = {
     method: req.method,
     hostname: APP_HOST,
     port: APP_PORT,
     path: req.url,
-    headers: remapHeaders(req.headers),
+    headers: withAuthCookie(remapHeaders(req.headers)),
     agent: false,
   }
   const proxyReq = httpRequest(options, (proxyRes) => {
+    // A 401 behind a (possibly stale) replay cookie means the app wants a
+    // fresh session — e.g. its 30-day cookie expired mid-run, or the process
+    // was restarted while clients were connected. The launch token is still
+    // valid (it belongs to this process), the exchange is not single-use, so
+    // re-exchanging and retrying once is transparent to the client.
+    if (TRUST_PROXY && proxyRes.statusCode === 401 && !retried) {
+      proxyRes.resume()
+      exchangeLaunchToken().finally(() => forwardHttp(req, res, true))
+      return
+    }
     const h = { ...proxyRes.headers }
     // Rewrite redirects that point back at the app so the browser stays on
     // the public origin.
     if (h.location && String(h.location).includes(`${APP_HOST}:${APP_PORT}`)) {
-      h.location = String(h.location).replace(`${APP_HOST}:${APP_PORT}`, `localhost:${PUBLIC_URL_PORT}`)
+      h.location = String(h.location).replace(`${APP_HOST}:${APP_PORT}`, PUBLIC_URL_HOST)
     }
+    // The session token rides in the URL (?token=). Referrer-Policy no-referrer
+    // keeps that secret from leaking through the Referer header to any third
+    // party the page loads (the app sets it on its auth redirects; this makes
+    // every served page carry it too).
+    if (h['referrer-policy'] === undefined) h['referrer-policy'] = 'no-referrer'
     writeHeadLike(res, proxyRes.statusCode || 502, h)
     proxyRes.pipe(res)
   })
@@ -119,7 +218,7 @@ function forwardUpgrade(req, socket, head) {
     hostname: APP_HOST,
     port: APP_PORT,
     path: req.url,
-    headers: remapHeaders(req.headers),
+    headers: withAuthCookie(remapHeaders(req.headers)),
     agent: false,
   }
   const proxyReq = httpRequest(options)
@@ -168,11 +267,11 @@ const dsh = spawn(DSH_BIN, ['web', '--port', String(APP_PORT), ...process.argv.s
   env: process.env,
 })
 
-// `dsh web` 0.1.2+ mints a per-run session token it prints only in its
-// ready-URL line and 401s every request until the browser exchanges that token
-// for an authority-bound cookie (a 303 + Set-Cookie). The proxy already
-// forwards the whole token/cookie/redirect dance, so the only fix needed here
-// is that the printed URL must be the public origin, not 127.0.0.1:30800.
+// `dsh web` mints a per-run session token it prints only in its ready-URL line
+// and 401s every request until the browser exchanges that token for an
+// authority-bound cookie (a 303 + Set-Cookie). The proxy already forwards the
+// whole token/cookie/redirect dance, so the only fix needed here is that the
+// printed URL must be the public origin, not 127.0.0.1:30800.
 const READY_URL = /^(dsh web: )(?:https?:\/\/)?127\.0\.0\.1:[0-9]+(\S*)\s*$/
 function relayLines(out) {
   let buf = ''
@@ -183,7 +282,31 @@ function relayLines(out) {
       const line = buf.slice(0, newline)
       buf = buf.slice(newline + 1)
       const m = line.match(READY_URL)
-      out.write(m ? `${m[1]}${PUBLIC_URL_BASE}${m[2]}\n` : `${line}\n`)
+      if (m) {
+        const tokenMatch = m[2].match(/[?&]token=([A-Za-z0-9_-]+)/)
+        if (tokenMatch) launchToken = tokenMatch[1]
+        let rendered = `${m[1]}${PUBLIC_URL_BASE}${m[2]}`
+        // The app appends its own "(LAN: http://<ip>:<port>/?token=...)" hint
+        // for remote clients. It prints the INTERNAL port (the app's own
+        // 30800), which nobody can reach — repoint that port at the published
+        // one. When DSH_PUBLIC_URL carries no explicit port (e.g. an
+        // https:// origin in front of the GUI), drop the hint entirely: the
+        // public origin is the authoritative URL and the guess would be wrong.
+        if (publicHostWithPort) {
+          rendered = rendered.replaceAll(`:${APP_PORT}`, `:${PUBLIC_URL_PORT}`)
+        } else if (publicUrlEnv) {
+          rendered = rendered.replace(/\s*\(LAN:[^)]*\)/, '')
+        }
+        // In trust-proxy mode the token is consumed by the proxy itself, so the
+        // printed URL stays clean and clients never need it.
+        if (TRUST_PROXY) {
+          rendered = rendered.replace(/[?&]token=[A-Za-z0-9_-]*/, '').replace(/\s*\(LAN:[^)]*\)/, '')
+          armTrustProxy()
+        }
+        out.write(`${rendered}\n`)
+      } else {
+        out.write(`${line}\n`)
+      }
     }
   }
   const onEnd = () => { if (buf) out.write(buf) }
@@ -211,8 +334,18 @@ for (const signal of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
   })
 }
 
-const server = createServer(forwardHttp)
-server.on('upgrade', forwardUpgrade)
+const server = createServer((req, res) => {
+  // In trust-proxy mode a client can arrive in the short window between the
+  // app becoming reachable and the first token exchange finishing; hold those
+  // until the replay cookie exists rather than handing them a 401.
+  waitAuth().then(() => forwardHttp(req, res)).catch((err) => {
+    if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' })
+    res.end(`dsh: proxy error: ${err.message}\n`)
+  })
+})
+server.on('upgrade', (req, socket, head) => {
+  waitAuth().then(() => forwardUpgrade(req, socket, head)).catch(() => socket.destroy())
+})
 
 // Wait for the app to accept connections before publishing: dsh prints its URL
 // line marginally before the listener is ready, and a request in that window

@@ -345,6 +345,17 @@ RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/node /app/apps/cli/lib/bin.js
 # DSH_WORKSPACE elsewhere to relocate it.
 RUN mkdir -p /workspace && chown dsh:dsh /workspace
 
+# Server mode workspace root + the browser shortcut. /workspaces is baked into
+# the image (not just created at boot) so that an empty named volume mounted
+# there inherits the dsh user's ownership and the operator can create
+# per-workspace subdirectories inside it, and the /home/dsh/workspaces symlink
+# makes the harness's in-app directory browser (which lists the home directory
+# first) start at the workspace root. The symlink must be baked here because
+# the hardened runtime rootfs is read-only — /home/dsh is not writable after
+# boot. Harmless in Local mode (/workspaces just sits empty and unused).
+RUN mkdir -p /workspaces && chown dsh:dsh /workspaces \
+ && ln -s /workspaces /home/dsh/workspaces
+
 # Everything harness-persistent lives under one root (default ~/.dsh). Mount a
 # volume here — profiles, session history, credentials, settings, user agent
 # presets — or point DSH_HOME at a dedicated directory under your volume.
@@ -377,9 +388,13 @@ RUN mkdir -p "$DSH_HOME" /home/dsh/.dsh/.pnpm-store \
 EXPOSE 3080
 
 # Curl the proxy so the whole chain (proxy -> app) decides health. The port is
-# the fixed 3080 -- the proxy always listens there inside the container.
+# the fixed 3080 -- the proxy always listens there inside the container. Once
+# the session lock arms, an unauthenticated GET / answers 401 (that is ALIVE,
+# not sick): the app returns 502 only while the web stack is still coming up,
+# so 2xx/3xx/401 mean healthy; anything else -- connection refused, 502 from the
+# proxy, 000 on timeout -- means the chain is broken.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-  CMD curl -fsS "http://127.0.0.1:3080/" >/dev/null || exit 1
+  CMD sh -c 'code="$(curl -sS -o /dev/null -w "%{http_code}" http://127.0.0.1:3080/ || true)"; case "$code" in 2*|301|302|303|307|401) exit 0;; *) exit 1;; esac'
 
 USER dsh
 WORKDIR /app

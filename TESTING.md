@@ -77,6 +77,50 @@ GHCR image**, so the test forces it onto your **local build** (`DSH_IMAGE=$IMAGE
 The stack comes up on host port `DSH_WEB_PORT` (default 3082, to avoid
 colliding with anything on 3080) and is torn down with its volumes afterward.
 
+## Server-mode compose boot test — `scripts/server-mode-test.sh`
+
+```sh
+DSH_IMAGE=dsh:dev ./scripts/server-mode-test.sh  # or: SERVER_MODE_TEST_PORT=3083 ...
+```
+
+Brings up **`docker-compose.server.yml`** (SERVER mode) on your local build and
+verifies the mode actually differs from local in the ways that matter:
+
+- the GUI is **published on `0.0.0.0` by default** (LAN), so the host's LAN
+  address answers HTTP 200 — the inverse of the local compose test's fence;
+- harness data and workspaces are separate **named volumes** (`/home/dsh/.dsh`
+  and `/workspaces`);
+- the server-mode entrypoint seeding ran: `DSH_WORKSPACE` defaults to
+  `/workspaces`, `$DSH_HOME/cordis.patch.yml` was written, the composed web
+  profile mounts `directory-picker-browse` with the stock `-auto` row disabled,
+  and the `workspaces` symlink into `/workspaces` exists in the harness home.
+
+The composed-profile checks (`dsh --profile web --dump-config`) are the proof
+that the remote-safe in-app directory browser is what remote clients get — the
+core of the server-mode workspace-selection story. The stack comes up on host
+port `SERVER_MODE_TEST_PORT` (default 3083) and is torn down with its volumes
+afterward.
+
+## Trust-proxy token test — `scripts/trust-proxy-test.sh`
+
+```sh
+DSH_IMAGE=dsh:dev ./scripts/trust-proxy-test.sh  # or: TRUST_PROXY_TEST_PORT=3095 ...
+```
+
+Boots the server stack with **`DSH_WEB_AUTH_MODE=trust-proxy`** and proves the
+bundled reverse proxy auto-exchanges the per-run session token:
+
+- an unauthenticated `GET /` answers **200** (no 401, no token dance) — the
+  proxy did the `?token=` exchange itself and replays the cookie;
+- the printed `dsh web:` line carries **no `?token=`** (clients never need it);
+- `/api/...` is **not 401** without a cookie — the proxy's replay cookie passed
+  the app's session gate.
+
+This is the "the layer in front is the real access control" mode for
+tsdproxy/Tailscale, TLS+auth edges, and VPNs; see the `DSH_WEB_AUTH_MODE`
+section in the README. The stack comes up on `TRUST_PROXY_TEST_PORT` (default
+3095) and is torn down with its volumes afterward.
+
 ## Plugin test suite — `scripts/test-plugin-suite.sh` (`make test-plugins`)
 
 ```sh

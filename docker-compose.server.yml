@@ -1,0 +1,121 @@
+# DeepSeek Harness — run the web GUI with Docker. SERVER MODE.
+#
+# This stack is for a machine that runs ~24/7 and is accessed from somewhere
+# else (a home server, a VPS): the harness data AND the workspaces both live on
+# named volumes, and the GUI is published on all interfaces (0.0.0.0) by
+# default, so anyone who can reach this host can open it in a browser.
+#
+# The workspace model is "one directory per workspace": the volume mounts at
+# /workspaces, and every workspace you open/create in the web GUI is a
+# subdirectory of it (e.g. /workspaces/acme-app). The harness's in-app
+# directory browser (list, type a path, create a folder) is pinned here because
+# nothing about it needs the server's display — it is the remote-safe picker.
+#
+#   1. cp .env.server.example .env.server   # add your API key (optional)
+#   2. docker compose -f docker-compose.server.yml --env-file .env.server up -d
+#   3. get the access URL from the log (see below), open it from your browser,
+#      and replace "localhost" with this server's address:
+#        docker compose -f docker-compose.server.yml logs dsh-server | grep 'dsh web:'
+#
+# Or run the installer (it creates .env.server for you):
+#   bash scripts/install.sh server
+#
+# Settings live in a .env.server file next to this one (see .env.server.example):
+#   DEEPSEEK_API_KEY   your provider key (or set it later in the GUI Settings)
+#   DSH_WEB_PORT       port to publish the GUI on                      (default 3080)
+#   DSH_BIND_ADDRESS   default 0.0.0.0 = LAN/internet access. There is NO login:
+#                      keep the log-printed session token private, and put TLS
+#                      or a reverse-proxy auth layer in front for anything more
+#                      than a trusted LAN (the bundled proxy is the documented
+#                      insertion point).
+#   DSH_TAG            image version to run                            (default latest)
+#
+# Two named volumes persist everything:
+#   dsh-server-home        -> /home/dsh/.dsh  (settings, credentials, sessions,
+#                                               chat history, the workspace
+#                                               registry, plugins)
+#   dsh-server-workspaces  -> /workspaces     (the workspace file trees)
+#
+# Stop with:  docker compose -f docker-compose.server.yml down       (data kept)
+# Fresh slate:  docker compose -f docker-compose.server.yml down -v (deletes volumes)
+
+services:
+  dsh:
+    image: ${DSH_IMAGE:-ghcr.io/andreasseidl/dsh-docker:${DSH_TAG:-latest}}
+    container_name: dsh-server
+    restart: unless-stopped
+
+    # Published on every interface by default: this is SERVER mode, the point
+    # is remote access. The publish address IS the access control — there is no
+    # login screen, only the per-boot session token printed in the log. Set
+    # DSH_BIND_ADDRESS=127.0.0.1 here to lock it back to this machine only.
+    ports:
+      - "${DSH_BIND_ADDRESS:-0.0.0.0}:${DSH_WEB_PORT:-3080}:3080"
+
+    environment:
+      # Your provider key. Set it in .env.server (or your shell) — or leave it
+      # empty and add the key on the GUI's Settings page after first boot.
+      DEEPSEEK_API_KEY: "${DEEPSEEK_API_KEY:-}"
+      DEEPSEEK_BASE_URL: "${DEEPSEEK_BASE_URL:-}"
+
+      # Switch the container's entrypoint into server mode: default workspace
+      # root /workspaces, seed the web profile with the in-app directory
+      # browser, and point the browser's home listing at the workspace root.
+      DSH_SERVER_MODE: "1"
+      DSH_WORKSPACE: "/workspaces"
+
+      # The host port you publish on, passed through so the startup banner
+      # prints the URL you will actually use (http://localhost:DSH_WEB_PORT).
+      DSH_WEB_PORT: "${DSH_WEB_PORT:-3080}"
+
+      # Set DSH_PUBLIC_URL to the origin remote clients actually reach (e.g.
+      # http://192.168.1.5:3080 or https://harness.example behind a TLS proxy)
+      # so the printed, token-carrying "dsh web:" URL is clickable from
+      # another machine instead of http://localhost:DSH_WEB_PORT.
+      DSH_PUBLIC_URL: "${DSH_PUBLIC_URL:-}"
+
+      # DSH_WEB_AUTH_MODE=trust-proxy makes the bundled proxy exchange the
+      # per-run session token itself (no 401/token dance for clients). Set it
+      # ONLY when a real access layer stands in front (tsdproxy/Tailscale ACL,
+      # TLS+auth edge, VPN); on a plain 0.0.0.0 publish it opens the GUI to
+      # anyone who can reach the port. Default "token" keeps the lock.
+      DSH_WEB_AUTH_MODE: "${DSH_WEB_AUTH_MODE:-token}"
+
+      # Set DSH_TELEMETRY_DISABLED=1 in .env.server to opt out of harness telemetry.
+      DSH_TELEMETRY_DISABLED: "${DSH_TELEMETRY_DISABLED:-}"
+
+    volumes:
+      # Harness data: settings, credentials, sessions, chat history, the
+      # workspace registry, plugins. (Registry + history persist here; the
+      # workspace FILES are on the other volume.)
+      - dsh-server-home:/home/dsh/.dsh
+      # The workspaces volume: every workspace is one subdirectory of
+      # /workspaces, created from the web GUI. File trees persist here.
+      - dsh-server-workspaces:/workspaces
+
+    # ── Hardening ───────────────────────────────────────────────────────────
+    # Read-only root filesystem: only the two volumes above and /tmp are
+    # writable. /tmp must stay exec-capable — the harness extracts and imports
+    # bundles from there, and `noexec` breaks first boot.
+    read_only: true
+    tmpfs:
+      - /tmp:rw,exec,nosuid,nodev,size=512m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 512
+
+    healthcheck:
+      # 2xx/3xx/401 all mean "the GUI chain is alive": once the per-run session
+      # lock arms, an unauthenticated GET / answers 401, and that is healthy —
+      # only a refused connection or a 502 from the proxy means the app is down.
+      test: ["CMD-SHELL", "code=$$(curl -sS -o /dev/null -w '%{http_code}' http://127.0.0.1:3080/ || true); case \"$$code\" in 2*|301|302|303|307|401) exit 0;; *) exit 1;; esac"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+
+volumes:
+  dsh-server-home:
+  dsh-server-workspaces:

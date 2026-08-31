@@ -1,4 +1,13 @@
-# DeepSeek Harness — run the web GUI with Docker.
+# DeepSeek Harness — run the web GUI with Docker. LOCAL MODE.
+#
+# This stack is for working locally on this machine: the harness data and the
+# agent's workspace are mounted from host directories (or private volumes when
+# you don't set them), and the GUI is published on 127.0.0.1 only — nothing on
+# your network can reach it, by default.
+#
+# For a SERVER the machine runs on 24/7 and is accessed remotely, use
+# docker-compose.server.yml instead (or `bash scripts/install.sh server`):
+# persistent volumes for harness data AND workspaces, LAN access by default.
 #
 #   1. (optional) cp .env.example .env   and put your API key in it
 #   2. docker compose up -d
@@ -14,9 +23,15 @@
 #                      also what the startup banner prints)
 #   DSH_BIND_ADDRESS   the address the GUI is published on. Default 127.0.0.1
 #                      = this machine only; set it to 0.0.0.0 for LAN access
+#   DSH_HOME_DIR       host folder for the harness data (settings, credentials,
+#                      history, plugins), e.g. ~/.dsh to share with a native
+#                      dsh install (default: the private `dsh-home` volume)
 #   DSH_WORKSPACE_DIR  host folder the agent works in, e.g. ./my-project
 #                      (default: the private `dsh-workspace` volume)
 #   DSH_TAG            image version to run                      (default latest)
+#
+# The quickest local setup is the installer, which writes these for you:
+#   bash scripts/install.sh local          # ~/.dsh + the current directory
 #
 # Ports: the GUI is served on 3080, the port the harness's own docs use, so
 # anything written for upstream applies here. (`dsh web` itself runs behind the
@@ -59,12 +74,21 @@ services:
       # prints the URL you will actually use (http://localhost:DSH_WEB_PORT).
       DSH_WEB_PORT: "${DSH_WEB_PORT:-3080}"
 
+      # DSH_WEB_AUTH_MODE=trust-proxy makes the bundled proxy exchange the
+      # per-run session token itself (no 401/token dance for clients). Set it
+      # ONLY when a real access layer sits in front of this container (TLS+auth
+      # edge, VPN, tsdproxy/Tailscale); on a plain 0.0.0.0 publish it opens the
+      # GUI to anyone who can reach the port. Default "token" keeps the lock.
+      DSH_WEB_AUTH_MODE: "${DSH_WEB_AUTH_MODE:-token}"
+
       # Set DSH_TELEMETRY_DISABLED=1 in .env to opt out of harness telemetry.
       DSH_TELEMETRY_DISABLED: "${DSH_TELEMETRY_DISABLED:-}"
 
     volumes:
       # Your harness data: settings, credentials, chat history, plugins.
-      - dsh-home:/home/dsh/.dsh
+      # Defaults to a private volume; point DSH_HOME_DIR at a host folder
+      # (e.g. ~/.dsh, to share with a native dsh install) to keep it on disk.
+      - ${DSH_HOME_DIR:-dsh-home}:/home/dsh/.dsh
       # The agent's workspace. Defaults to a private volume; point
       # DSH_WORKSPACE_DIR at a host folder (e.g. ./my-project) to let the agent
       # work on real code — it can only ever see what you mount here.

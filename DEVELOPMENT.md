@@ -9,22 +9,39 @@ contribute, see [TESTING.md](TESTING.md) and [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ```
 container/             files copied into the image with the source
-  bin/docker-entrypoint.sh   env → `dsh web` flag mapping; seeds defaults
-  defaults/           first-boot scaffolds: settings.yaml, AGENTS.md
+  bin/docker-entrypoint.sh   env → `dsh web` flag mapping; seeds defaults;
+                             also drives SERVER mode (DSH_SERVER_MODE): default
+                             workspace root /workspaces, seeds the browse-pin
+                             cordis.patch.yml + server AGENTS.md, symlinks the
+                             workspaces root into the harness home
+  defaults/           first-boot scaffolds: settings.yaml, AGENTS.md,
+                      AGENTS.server.md + cordis.patch.yml (server mode)
   scripts/            reverse-proxy.mjs (network/proxy mode),
                       inject-randomuuid-polyfill.mjs,
                       heal-workspace-links.mjs
 Dockerfile             multi-stage build (builder → runtime)
-Makefile               build / run / publish / shell / clean targets
-docker-compose.yml     hardened deploy wiring (proxy + volumes + read-only
-                       rootfs); defaults to the published GHCR image and takes
-                       DSH_IMAGE (local build override) / DSH_TAG (pin),
-                       DSH_WEB_PORT (host port), DSH_BIND_ADDRESS (publish address),
-                       DSH_WORKSPACE_DIR
-.env.example           the user-facing settings, commented; users copy it to
-                       .env next to docker-compose.yml (.env is git-ignored)
+Makefile               build / run / publish / shell / clean / install-* targets
+docker-compose.yml     LOCAL MODE hardened deploy wiring (host dirs optional,
+                       publishes 127.0.0.1 by default); defaults to the published
+                       GHCR image and takes DSH_IMAGE (local build override) /
+                       DSH_TAG (pin), DSH_WEB_PORT (host port),
+                       DSH_BIND_ADDRESS (publish address), DSH_HOME_DIR /
+                       DSH_WORKSPACE_DIR (host dirs)
+docker-compose.server.yml  SERVER MODE stack: named volumes for harness home +
+                          workspaces (/workspaces), publishes 0.0.0.0 by default,
+                          container `dsh-server`
+.env.example           LOCAL mode settings, commented; users copy it to .env
+                       (.env is git-ignored)
+.env.server.example    SERVER mode settings; users copy it to .env.server
 .github/workflows/docker-publish.yml   GHCR publishing on tags + weekly
 scripts/build-context.sh  stages the pruned source build context
+scripts/install.sh     the two-mode installer (local | server | status | update |
+                       uninstall) — also works as a `curl | sh` one-liner;
+                       writes .env / .env.server and brings the stack up
+scripts/server-mode-test.sh  boots the server stack and checks publish address,
+                       volumes, and the browse-picker pin (see TESTING.md)
+scripts/trust-proxy-test.sh  boots the server stack with DSH_WEB_AUTH_MODE=trust-proxy
+                       and proves the proxy auto-exchanges the session token
 scripts/smoke-test.sh     boots the image and checks volumes/persistence/proxy
 scripts/plugin-test.sh    installs a native plugin end-to-end (node-pty)
 scripts/compose-test.sh   boots + verifies the hardened compose stack (read-only, caps, tmpfs, health)
@@ -32,6 +49,12 @@ plans/                 internal build-speed research notes (LEARNINGS.md,
                        docker-build-speedup-next.md) — history, not user docs
 test-plugins/          the probe plugin + its own README (see TESTING.md)
 ```
+
+The two modes share one image; only the mount wiring, the publish address, and
+two first-boot seeds differ. Server mode's `$DSH_HOME/cordis.patch.yml` (seeded
+once, never overwritten) pins the harness's directory-picker seam to the
+`-browse` backend — the in-app file browser that works for remote clients. That
+is the harness's documented swap point, so no harness source is forked.
 
 Most of the work is wiring, not application code: the harness is consumed
 unmodified from a checkout (`DSH_SRC`), the Dockerfile compiles it and keeps
@@ -46,6 +69,7 @@ container-specific glue (entrypoint, proxy, polyfill, link-healing, tests).
 | `make build` | `docker build .docker-context` → `dsh:<TAG>` |
 | `make tag` | Alias for `build` |
 | `make run` | Run the GUI (proxy mode, both volumes, `-p <PORT>:<PORT>`) |
+| `make install-local` / `install-server` | The user-facing installer (`scripts/install.sh local/server`) — writes `.env` / `.env.server` and brings the stack up |
 | `make shell` | Throwaway container with the same mounts, `/bin/bash` as `dsh` |
 | `make push` / `make publish` | `docker push <image>` (log in first) |
 | `make test-plugins` | Run the plugin test suite against `DSH_IMAGE` (see TESTING.md) |

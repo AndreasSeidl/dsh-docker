@@ -9,6 +9,7 @@
 
 # Local compose configuration (.env.example is tracked)
 .env
+.env.server
 
 # Editor/OS noise
 .DS_Store

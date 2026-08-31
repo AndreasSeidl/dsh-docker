@@ -28,6 +28,18 @@ pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
 check() { if "${@:2}" >/dev/null 2>&1; then pass "$1"; else fail "$1"; fi; }
 
+# The GUI is "reachable" when the proxy answers from the app — 2xx is the open
+# first-boot state, 3xx the auth redirects, and the steady state is the token
+# lock answering 401 on an unauthenticated GET / (see Dockerfile HEALTHCHECK).
+reachable() {
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time "$2" "$1" || true)"
+  case "$code" in
+    2*|301|302|303|307|401) return 0 ;;
+  esac
+  echo "HTTP $code" >&2
+  return 1
+}
+
 cleanup() {
   DSH_WEB_PORT="$PORT" docker compose down -v >/dev/null 2>&1 || true
 }
@@ -54,8 +66,8 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
   else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null))"; fi
 
-  check "web GUI reachable via the published port (GET 200)" \
-    curl -fsS -o /dev/null --max-time 20 "http://127.0.0.1:$PORT/"
+  check "web GUI reachable via the published port (proxy answers)" \
+    reachable "http://127.0.0.1:$PORT/" 20
 
   # ── the access fence: the PUBLISH ADDRESS, not anything in the container ──
   # Default (DSH_BIND_ADDRESS unset) must publish on 127.0.0.1 only, so the
@@ -130,15 +142,18 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   fi
   if [ -n "$LANIP" ]; then
     for _ in $(seq 1 40); do
-      [ "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://$LANIP:$PORT/")" = "200" ] && break
+      reachable "http://$LANIP:$PORT/" 3 && break
       sleep 1
     done
     open_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 8 "http://$LANIP:$PORT/" || true)
-    if [ "$open_code" = "200" ]; then
-      pass "the GUI is reachable on the host's LAN address ($LANIP)"
-    else
-      fail "LAN address still not reachable with DSH_BIND_ADDRESS=0.0.0.0 (HTTP $open_code)"
-    fi
+    case "$open_code" in
+      2*|301|302|303|307|401)
+        pass "the GUI is reachable on the host's LAN address ($LANIP)"
+        ;;
+      *)
+        fail "LAN address still not reachable with DSH_BIND_ADDRESS=0.0.0.0 (HTTP $open_code)"
+        ;;
+    esac
   fi
 
   DSH_WEB_PORT="$PORT" DSH_BIND_ADDRESS=0.0.0.0 docker compose down -v >/dev/null 2>&1

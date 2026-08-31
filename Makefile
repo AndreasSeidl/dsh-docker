@@ -48,7 +48,7 @@ CACHE_REF    ?=
 CACHE_FROM   := --cache-from=type=registry,ref=$(CACHE_REF)
 CACHE_ARGS   := $(if $(CACHE_REF),$(CACHE_FROM))
 
-.PHONY: help build publish run shell push tag clean context test-plugins cache-prune cache-reset
+.PHONY: help build publish run shell push tag clean context test-plugins cache-prune cache-reset install-local install-server
 
 .DEFAULT_GOAL := help
 
@@ -109,6 +109,14 @@ context:
 ## Run the container test-plugin suite (any well-formed dsh 0.1+ plugin) against DSH_IMAGE.
 test-plugins:
 	./scripts/test-plugin-suite.sh
+
+## Install & start LOCAL mode (host dirs for harness data + workspace; this machine only).
+install-local:
+	./scripts/install.sh local
+
+## Install & start SERVER mode (persistent volumes for harness data + workspaces; LAN access by default).
+install-server:
+	./scripts/install.sh server
 
 ## Remove the staged build context and local experiment dirs.
 clean:

@@ -14,9 +14,19 @@
 #
 # Env vars consumed here (beyond the ones the harness itself reads straight
 # from the process environment, which all pass through untouched):
+#   DSH_SERVER_MODE      Any non-0 value switches this container to SERVER
+#                        mode: the default workspace root becomes /workspaces
+#                        (backed by the dsh-workspaces volume), the web
+#                        profile pins the in-app directory browser (so remote
+#                        operators pick/create workspaces without any host
+#                        display), a `workspaces` symlink appears in the
+#                        harness home so the browser starts at the workspace
+#                        root, and a server-flavoured AGENTS.md scaffold is
+#                        seeded. See docker-compose.server.yml.
 #   DSH_WORKSPACE        Working directory the harness uses as its default
 #                        workspace root (its process.cwd). Defaults to
-#                        /workspace — the volume-backed agent workspace.
+#                        /workspace — the volume-backed agent workspace
+#                        (/workspaces in server mode).
 #   DSH_WEB_PORT         The port on YOUR machine the GUI is published on
 #                        (default 3080). The startup banner prints it, and the
 #                        proxy uses it to rewrite the app's tokenized ready-URL
@@ -24,6 +34,24 @@
 #                        is passed through automatically; with `docker run` set
 #                        it to match your `-p <port>:3080`. The GUI port
 #                        INSIDE the container is always 3080.
+#   DSH_PUBLIC_URL       The origin (scheme://host[:port], no path) remote
+#                        clients actually reach this GUI at. When set, the
+#                        proxy prints the tokenized "dsh web:" URL with that
+#                        origin instead of http://localhost:DSH_WEB_PORT — the
+#                        fix for LAN/server use, where the token URL must be
+#                        clickable from another machine (e.g.
+#                        http://192.168.1.5:3080 or, behind a TLS proxy,
+#                        https://harness.example).
+#   DSH_WEB_AUTH_MODE    How the per-run session token is handled:
+#                          token       (default) the app gates every request;
+#                                      clients open the printed ?token= URL once.
+#                          trust-proxy the bundled proxy exchanges the token
+#                                      itself and replays the cookie, so there
+#                                      is no 401/token dance — the printed URL
+#                                      is plain. Use ONLY when a real access
+#                                      layer stands in front (tsdproxy/Tailscale
+#                                      ACL, TLS + auth edge, VPN, loopback); on
+#                                      a plain 0.0.0.0 publish it opens the GUI.
 #
 # NOTE: who may reach the GUI is NOT decided in here. The proxy binds every
 # interface in the container's network namespace, because a published port has
@@ -86,10 +114,21 @@ print_boot_banner() {
   echo "  DeepSeek Harness — starting the web GUI" >&2
   echo "  ───────────────────────────────────────────────────────────────" >&2
   echo "  Open        http://localhost:${web_port}" >&2
-  echo "  Access      session-locked: open the \"dsh web:\" URL printed in the" >&2
-  echo "              logs (it carries the one-time session token)" >&2
+  if [ "${DSH_WEB_AUTH_MODE:-token}" = "trust-proxy" ]; then
+    echo "  Access      delegated: the bundled proxy exchanges the session token" >&2
+    echo "              itself — open the \"dsh web:\" URL (no token needed). The" >&2
+    echo "              real gate is the layer in front (tsdproxy/Tailscale, TLS" >&2
+    echo "              + auth, VPN). Do NOT trust this on a plain 0.0.0.0 publish." >&2
+  else
+    echo "  Access      session-locked: open the \"dsh web:\" URL printed in the" >&2
+    echo "              logs (it carries the one-time session token)" >&2
+  fi
   echo "  Data        ${DSH_HOME}" >&2
   echo "  Workspace   ${workspace}" >&2
+  if [ "${DSH_SERVER_MODE:-0}" != "0" ]; then
+    echo "  Mode        server (remote-safe): workspaces are created under" >&2
+    echo "              ${workspace} in the web GUI's in-app directory browser" >&2
+  fi
   echo "  Shell in    docker exec -it $(hostname) bash" >&2
   echo "" >&2
 
@@ -152,6 +191,17 @@ DeepSeek Harness container — usage
   Work on your own code -- bind your project as the workspace:
       -v "$PWD":/workspace
 
+  Server mode -- separate volumes for harness data and workspaces, on the
+  network by default (publish 0.0.0.0; there is no login, only the log token):
+    docker run -d --name dsh-server -p 0.0.0.0:3080:3080 \
+      -v dsh-home:/home/dsh/.dsh -v dsh-workspaces:/workspaces \
+      -e DSH_SERVER_MODE=1 -e DSH_WORKSPACE=/workspaces \
+      -e DEEPSEEK_API_KEY=sk-... \
+      IMAGE
+    then open the "dsh web:" URL from `docker logs dsh-server` (replace
+    localhost with this server's address). Workspaces are created per
+    subdirectory of /workspaces in the web GUI's in-app directory browser.
+
 Modes (first argument):
   web                  the web GUI (default)
   shell                an interactive bash shell with the same mounts
@@ -177,6 +227,42 @@ HELP
 # ── First-boot volume initialization ──────────────────────────────────────
 # Idempotent: seeds scaffold files into an empty $DSH_HOME, never overwrites.
 mkdir -p "$DSH_HOME" 2>/dev/null || true
+
+# ── Server mode (DSH_SERVER_MODE != 0) ────────────────────────────────────
+# Layout: the harness home stays on the dedicated dsh-home volume, and a
+# second volume mounts at /workspaces. Operators create one workspace per
+# subdirectory of /workspaces from the web GUI (each session then runs with
+# that subdirectory as its cwd, and the file sandbox confines its writes
+# there). Work done before the generic first-boot seeding below:
+#   * default the workspace root to /workspaces,
+#   * seed a cordis.patch.yml that pins the in-app directory browser (the
+#     remote-safe picker) — never a native OS dialog on an unattended server,
+#   * symlink the workspace root into the harness home so the browser's
+#     home-anchored listing starts at /workspaces,
+#   * seed the server-flavoured AGENTS.md scaffold (the generic loop below
+#     then finds AGENTS.md present and leaves it alone).
+if [ "${DSH_SERVER_MODE:-0}" != "0" ]; then
+  if [ -z "${DSH_WORKSPACE:-}" ]; then
+    DSH_WORKSPACE="/workspaces"
+    export DSH_WORKSPACE
+  fi
+  if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
+    if [ ! -e "$DSH_HOME/cordis.patch.yml" ] && [ -f "/opt/dsh/defaults/cordis.patch.yml" ]; then
+      cp "/opt/dsh/defaults/cordis.patch.yml" "$DSH_HOME/cordis.patch.yml" 2>/dev/null || true
+      [ -f "$DSH_HOME/cordis.patch.yml" ] && echo "dsh: seeded server-mode cordis.patch.yml into $DSH_HOME (pins the in-app directory browser)" >&2
+    fi
+    if [ ! -e "$DSH_HOME/AGENTS.md" ] && [ -f "/opt/dsh/defaults/AGENTS.server.md" ]; then
+      cp "/opt/dsh/defaults/AGENTS.server.md" "$DSH_HOME/AGENTS.md" 2>/dev/null || true
+      [ -f "$DSH_HOME/AGENTS.md" ] && echo "dsh: seeded server-mode AGENTS.md into $DSH_HOME" >&2
+    fi
+    # The in-app browser lists the home directory first; a `workspaces` entry
+    # there takes the operator straight to the workspace root.
+    if [ -d "$DSH_WORKSPACE" ] && [ ! -e "/home/dsh/workspaces" ]; then
+      ln -s "$DSH_WORKSPACE" "/home/dsh/workspaces" 2>/dev/null || true
+    fi
+  fi
+fi
+
 if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
   for f in settings.yaml AGENTS.md; do
     if [ ! -e "$DSH_HOME/$f" ] && [ -f "/opt/dsh/defaults/$f" ]; then
