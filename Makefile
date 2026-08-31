@@ -48,7 +48,7 @@ CACHE_REF    ?=
 CACHE_FROM   := --cache-from=type=registry,ref=$(CACHE_REF)
 CACHE_ARGS   := $(if $(CACHE_REF),$(CACHE_FROM))
 
-.PHONY: help build publish run shell push tag clean context test-plugins cache-prune cache-reset install-local install-server
+.PHONY: help build publish run shell push tag clean context test-plugins cache-prune cache-reset install-local install-server docs-sync docs-check
 
 .DEFAULT_GOAL := help
 
@@ -132,3 +132,11 @@ cache-prune:
 ## Start from a zero cache (forces a cold rebuild; use sparingly).
 cache-reset:
 	docker buildx prune -af
+
+## Restate the README's support floor from .supported-version (run after bumping the floor).
+docs-sync:
+	./scripts/sync-supported-version.sh
+
+## Verify the README's stated support floor matches .supported-version (CI runs this).
+docs-check:
+	./scripts/sync-supported-version.sh --check

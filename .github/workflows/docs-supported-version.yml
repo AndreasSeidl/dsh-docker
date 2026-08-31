@@ -1,0 +1,29 @@
+name: docs-supported-version
+
+# Keep the README's stated support floor glued to .supported-version (the
+# single source of truth). Bumping the floor edits .supported-version, then
+# `make docs-sync` restates it in the README; this runs the sync script in
+# --check mode on every relevant push so a drifted README fails CI instead of
+# silently understating/stale-ing what we support.
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.supported-version'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'scripts/sync-supported-version.sh'
+  pull_request:
+    paths:
+      - '.supported-version'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+      - 'scripts/sync-supported-version.sh'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify README floor matches .supported-version
+        run: ./scripts/sync-supported-version.sh --check

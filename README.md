@@ -150,6 +150,9 @@ drives the test suites and the publish pipeline (see
   against it** at all, and the publish pipeline refuses to publish it. It may
   remain on GHCR as an immutable artifact, but nothing is guaranteed about it.
 
+The floor stated below is generated from [`.supported-version`](.supported-version)
+(`make docs-sync`, enforced by CI) — edit the file, not this paragraph.
+
 Right now the floor is **`0.1.2-alpha.2`** (the current release, alias of
 `latest`). The two older published tags predate it and are unsupported (kept on
 GHCR, no longer tested):
