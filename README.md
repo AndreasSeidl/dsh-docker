@@ -155,15 +155,17 @@ drives the test suites and the publish pipeline (see
 The floor stated below is generated from [`.supported-version`](.supported-version)
 (`make docs-sync`, enforced by CI) — edit the file, not this paragraph.
 
-Right now the floor is **`0.1.2-alpha.2`** (the current release, alias of
-`latest`). The two older published tags predate it and are unsupported (kept on
-GHCR, no longer tested):
+Right now the floor is **`0.1.2-alpha.2`** — the oldest version that still
+passes the complete test suite. The current release is **`0.1.2-alpha.3`**
+(alias of `latest`). The two versions below the floor, `0.1.1-rc.2` and
+`0.1.2-alpha.1`, are unsupported (kept on GHCR, no longer tested):
 
 | Version | Session lock / WS relay | Trust-proxy | Server-mode profile | Docker health |
 |---|---|---|---|---|
 | `0.1.1-rc.2` | no (open 200 first boot) | no | no | `healthy` |
 | `0.1.2-alpha.1` | yes | no | no | **reports `unhealthy`** ⚠️ |
-| `0.1.2-alpha.2` (`latest`) | yes | yes | yes | `healthy` |
+| `0.1.2-alpha.2` | yes | yes | yes | `healthy` |
+| `0.1.2-alpha.3` (`latest`) | yes | yes | yes | `healthy` |
 
 The one operational caveat: `0.1.2-alpha.1` **always reports `unhealthy` under
 Docker even though it boots and serves correctly** — its baked-in healthcheck
