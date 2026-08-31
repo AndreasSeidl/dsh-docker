@@ -10,13 +10,17 @@
 #       ghcr.io/<owner>/dsh-docker:nightly   (keeps "latest source" rolling)
 #   * Manually (workflow_dispatch, `version` input) → build any upstream
 #     tag/commit and push <version>.
+#   * Reusable (workflow_call, `version` input) → called by the hourly
+#     check-upstream-release workflow when a newer upstream release appears.
 #
 # NATIVE multi-arch: two matrix jobs build linux/amd64 (ubuntu-latest) and
 # linux/arm64 (ubuntu-24.04-arm hosted ARM runner) natively — no QEMU, so the
 # arm64 leg is as fast as amd64 (QEMU cross-building once cost ~1 h of emulated
-# pnpm/tsc on a cold run). Each platform pushes a per-arch intermediate tag
-# (`<version>-<arch>`); the `merge` job joins them into the final multi-arch
-# manifest with `docker buildx imagetools create`.
+# pnpm/tsc on a cold run). Each platform pushes a throwaway per-arch tag
+# (dsh-int-<arch>-<run-id>); the `merge` job joins them into the final multi-arch
+# manifest with `docker buildx imagetools create`, then deletes the throwaway
+# versions via the GitHub REST API so GHCR keeps only the versioned multi-arch
+# rows (no `<version>-amd64`/`<version>-arm64` rows).
 name: docker-publish
 
 on:
@@ -30,6 +34,16 @@ on:
         description: 'Upstream dsh version/tag to build (default: upstream default branch)'
         required: false
         default: ''
+  # Reusable entry point: check-upstream-release.yml calls this with an explicit
+  # upstream version whenever an hourly poll finds a newer release. `version` is
+  # mirrored from workflow_dispatch, so the resolution steps below work for
+  # both entry points unchanged.
+  workflow_call:
+    inputs:
+      version:
+        description: 'Upstream dsh version/tag to build (default: upstream default branch)'
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -122,9 +136,13 @@ jobs:
           TARGET="$VERSION"
           [ -n "$TARGET" ] || TARGET="nightly"
           echo "target=$TARGET" | tee -a "$GITHUB_OUTPUT"
-          # Per-arch intermediate tag; the merge job joins these into the final
-          # manifest. Bare refs would push to docker.io/library, so always full.
-          echo "perarch_tags=$IMG:$TARGET-${{ matrix.arch }}" | tee -a "$GITHUB_OUTPUT"
+          # Throwaway per-arch tag: the merge job joins these into the final
+          # multi-arch manifest and then deletes them, so GHCR keeps only the
+          # versioned multi-arch rows. They are NOT part of the multi-arch
+          # index (the index references the platform images directly), so they
+          # are safe to remove. github.run_id keeps them unique per run; bare
+          # refs would push to docker.io/library, so always fully qualified.
+          echo "perarch_tags=$IMG:dsh-int-${{ matrix.arch }}-${{ github.run_id }}" | tee -a "$GITHUB_OUTPUT"
 
       - name: Build and push (linux/${{ matrix.arch }})
         uses: docker/build-push-action@v6
@@ -142,6 +160,14 @@ jobs:
           # analogue of a 100 GB local build cache) — see README "Cache hygiene".
           cache-from: type=gha,scope=dsh-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=dsh-${{ matrix.arch }}
+          # Disable BuildKit's default SLSA provenance/SBOM attestations: they
+          # are pushed as extra index entries with no os/arch and show up as
+          # "unknown/unknown" platforms in UIs and `manifest inspect` (and
+          # pinning by their digest yields a non-runnable stub). We don't need
+          # the attestation metadata here, so keep the published index clean:
+          # only the two real platform images.
+          provenance: false
+          sbom: false
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
             org.opencontainers.image.revision=${{ github.sha }}
@@ -183,18 +209,66 @@ jobs:
         env:
           IMG: ${{ steps.meta.outputs.image }}
           TARGET: ${{ steps.meta.outputs.target }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
+          # Merge the two throwaway per-arch tags into one multi-arch index
+          # (`:version` + `:latest`, or `:nightly`), then delete the throwaway
+          # `dsh-int-<arch>-<run>` versions via the GitHub REST API so the
+          # package keeps only the versioned multi-arch rows. The multi-arch
+          # index references the platform IMAGES directly — not these
+          # single-platform index versions — so removing them never breaks the
+          # published tag.
+          set -u
           ARCH_TAGS=""
           for a in amd64 arm64; do
-            if docker buildx imagetools inspect "$IMG:$TARGET-$a" >/dev/null 2>&1; then
-              ARCH_TAGS="$ARCH_TAGS $IMG:$TARGET-$a"
+            INT="$IMG:dsh-int-$a-${{ github.run_id }}"
+            if docker buildx imagetools inspect "$INT" >/dev/null 2>&1; then
+              ARCH_TAGS="$ARCH_TAGS $INT"
             else
-              echo "warning: missing $IMG:$TARGET-$a — skipping"
+              echo "warning: missing $INT — skipping"
             fi
           done
           [ -n "$ARCH_TAGS" ] || { echo "no per-arch images to merge" >&2; exit 1; }
           FINAL_TAGS="-t $IMG:$TARGET"
           [ "$TARGET" = "nightly" ] || FINAL_TAGS="$FINAL_TAGS -t $IMG:latest"
-          docker buildx imagetools create $FINAL_TAGS $ARCH_TAGS
-          echo "published $IMG:$TARGET (${TARGET#latest} tags set)"
+          docker buildx imagetools create $FINAL_TAGS $ARCH_TAGS \
+            || { echo "merge failed" >&2; exit 1; }
+          echo "published $IMG:$TARGET (${TARGET} tag set)"
+
+          echo
+          echo "== cleanup: deleting throwaway dsh-int-* per-arch versions =="
+          # GHCR has no registry-level DELETE (`405 UNSUPPORTED`), so use the
+          # GitHub REST API with the run's GITHUB_TOKEN. Best-effort: a cleanup
+          # failure must not fail the publish (the merged multi-arch tag already
+          # exists), it just leaves a dsh-int-* row to delete manually.
+          if [ -n "${TOKEN:-}" ]; then
+            for a in amd64 arm64; do
+              INT="$IMG:dsh-int-$a-${{ github.run_id }}"
+              VID="$(curl -s -H 'Authorization: Bearer '"$TOKEN" \
+                       "https://api.github.com/user/packages/container/${GITHUB_REPOSITORY#*/}/versions?per_page=200" \
+                     | python3 - "$INT" <<'PYEOF'
+          import json, sys
+          tag = sys.argv[1]
+          try:
+              vs = json.load(sys.stdin)
+          except Exception:
+              vs = []
+          for v in vs:
+              if tag in (v.get("metadata", {}).get("container", {}).get("tags") or []):
+                  print(v["id"])
+                  break
+          PYEOF
+                     )"
+              if [ -n "$VID" ]; then
+                code="$(curl -s -o /dev/null -w '%{http_code}' -X DELETE \
+                          -H 'Authorization: Bearer '"$TOKEN" \
+                          "https://api.github.com/user/packages/container/${GITHUB_REPOSITORY#*/}/versions/$VID" || true)"
+                echo "  deleted $INT (id=$VID) -> HTTP $code"
+              else
+                echo "  warning: $INT not found (already deleted, or the REST API requires credentials)"
+                echo "  -> manual fallback: delete the dsh-int-* versions in the GHCR UI"
+              fi
+            done
+          else
+            echo "  warning: no GITHUB_TOKEN available — dsh-int-* versions left for manual cleanup"
+          fi

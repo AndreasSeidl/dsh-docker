@@ -95,6 +95,10 @@ jobs:
           # separate scope so this guard's cache is independent of publishes).
           cache-from: type=gha,scope=dsh-guard-amd64
           cache-to: type=gha,mode=max,scope=dsh-guard-amd64
+          # No attestations here either (matches the publish workflow; keeps the
+          # size assertions operating on the pure image).
+          provenance: false
+          sbom: false
           build-args: |
             DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}
 
