@@ -156,6 +156,56 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   fi
   check "workspaces symlink present in the harness home" \
     docker exec dsh-server sh -c 'test -L /home/dsh/workspaces && test "$(readlink /home/dsh/workspaces)" = "/workspaces"'
+
+  # ── DSH_ALLOW_REMOTE_SETTINGS: the remote-browser Settings gate ──────────
+  # Server mode defaults the flag ON so a remote browser can reach the Settings
+  # pages (upstream serves them only to loopback pages, and a server install is
+  # reached over a network by definition). DSH_ALLOW_REMOTE_SETTINGS=0 restores
+  # upstream's loopback-only behavior; a non-server boot leaves it OFF. Each
+  # probe boots the image directly (trust-proxy mode so / answers 200 HTML) and
+  # greps the served document for the injected flag script; the first check
+  # guards that the shipped client bundles actually honor the flag.
+  check "shipped client bundles honor DSH_ALLOW_REMOTE_SETTINGS (patched at build)" \
+    docker run --rm --entrypoint sh "$IMAGE" -c \
+      'grep -q "globalThis.__DSH_ALLOW_REMOTE_SETTINGS__" /app/packages/client/ui-settings/lib/client.js && grep -q "globalThis.__DSH_ALLOW_REMOTE_SETTINGS__" /app/packages/client/ui-settings-general/lib/client.js'
+
+  html_probe() { curl -sS -m 10 "http://127.0.0.1:$1/" 2>/dev/null || true; }
+
+  docker run --rm -d --name dsh-rs-on \
+    -e DSH_SERVER_MODE=1 -e DSH_WORKSPACE=/workspaces \
+    -e DSH_WEB_AUTH_MODE=trust-proxy -e DSH_PUBLIC_URL=http://127.0.0.1:3097 \
+    -e DSH_TELEMETRY_DISABLED=1 -p 3097:3080 "$IMAGE" >/dev/null 2>&1
+  if wait_reachable "http://127.0.0.1:3097/" 60 \
+       && printf '%s' "$(html_probe 3097)" | grep -q '__DSH_ALLOW_REMOTE_SETTINGS__'; then
+    pass "server mode defaults remote Settings ON (flag injected into served HTML)"
+  else
+    fail "server mode did not inject the remote-settings flag (expected default ON)"
+  fi
+  docker rm -f dsh-rs-on >/dev/null 2>&1
+
+  docker run --rm -d --name dsh-rs-off \
+    -e DSH_SERVER_MODE=1 -e DSH_WORKSPACE=/workspaces \
+    -e DSH_WEB_AUTH_MODE=trust-proxy -e DSH_PUBLIC_URL=http://127.0.0.1:3098 \
+    -e DSH_ALLOW_REMOTE_SETTINGS=0 -e DSH_TELEMETRY_DISABLED=1 \
+    -p 3098:3080 "$IMAGE" >/dev/null 2>&1
+  if wait_reachable "http://127.0.0.1:3098/" 60 \
+       && ! printf '%s' "$(html_probe 3098)" | grep -q '__DSH_ALLOW_REMOTE_SETTINGS__'; then
+    pass "DSH_ALLOW_REMOTE_SETTINGS=0 disables the flag (upstream default restored)"
+  else
+    fail "DSH_ALLOW_REMOTE_SETTINGS=0 still injected the flag (expected OFF)"
+  fi
+  docker rm -f dsh-rs-off >/dev/null 2>&1
+
+  docker run --rm -d --name dsh-rs-norm \
+    -e DSH_WEB_AUTH_MODE=trust-proxy -e DSH_PUBLIC_URL=http://127.0.0.1:3099 \
+    -e DSH_TELEMETRY_DISABLED=1 -p 3099:3080 "$IMAGE" >/dev/null 2>&1
+  if wait_reachable "http://127.0.0.1:3099/" 60 \
+       && ! printf '%s' "$(html_probe 3099)" | grep -q '__DSH_ALLOW_REMOTE_SETTINGS__'; then
+    pass "non-server boot keeps remote Settings OFF (upstream default)"
+  else
+    fail "non-server boot injected the flag (expected OFF outside server mode)"
+  fi
+  docker rm -f dsh-rs-norm >/dev/null 2>&1
 else
   echo "image $IMAGE not present — run 'make build' (or DSH_IMAGE=... docker build) first"
   exit 1

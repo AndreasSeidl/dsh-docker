@@ -337,6 +337,31 @@ the whole server.
 - Defaults: `DSH_BIND_ADDRESS` is `0.0.0.0` here (set it to `127.0.0.1` to lock
   it back to the server itself), and `DSH_WEB_PORT` is `3080`.
 
+### Remote browser Settings
+
+DeepSeek Harness serves its **Settings pages** (the Models/provider-directory
+tab and the General `settings.yaml` editor) only to a browser whose page is on
+a **loopback** host. A remote browser — which is what server mode is for —
+gets *"Loading the provider directory failed: settings are unavailable in this
+browser"*, because upstream deliberately keeps provider credentials tied to the
+machine that owns the harness.
+
+This image patches the shipped client so Settings also honor
+`DSH_ALLOW_REMOTE_SETTINGS`, and **defaults it to `1` in server mode**: a remote
+browser can then read and edit the Settings pages (saved to the
+`dsh-server-home` volume, so they survive restarts and apply to every client).
+The tradeoff is the one this section already states — anyone who can open the
+remote GUI can also manage provider keys — which in server mode is exactly the
+access gate described above (the publish mapping + token/cookie, and ideally a
+TLS/edge layer in front). To keep upstream's loopback-only behavior, set:
+
+```sh
+DSH_ALLOW_REMOTE_SETTINGS=0
+```
+
+in `.env.server` (or `-e`). Outside server mode the flag is off by default, so
+local/loopback deployments behave exactly like upstream.
+
 ### Everyday server commands
 
 | I want to… | Command |
@@ -404,6 +429,7 @@ Compose, put them in a `.env` next to your compose files (copy
 | `DSH_HOME_DIR` | volume | *(Local compose only)* Host folder for the harness data, e.g. `~/.dsh` to share with a native install. Server mode always uses the `dsh-server-home` volume. |
 | `DSH_WORKSPACE_DIR` | volume | *(Local compose only)* Host folder the agent works in, e.g. `./my-project`. Server mode always uses the `dsh-server-workspaces` volume at `/workspaces`. |
 | `DSH_TAG` | `latest` | *(Compose only)* Image version: `latest` or a pinned release like `0.1.2-alpha.2`. |
+| `DSH_ALLOW_REMOTE_SETTINGS` | off / `1` server | The GUI's Settings pages (provider config, the `settings.yaml` document) — upstream serves them only to a browser on a loopback page, so a remote browser normally gets *"settings are unavailable in this browser"*. This image patches the client to honor the switch instead: `1` lets a remote browser read/edit Settings, `0` or unset keeps the upstream loopback-only behavior. **Server mode defaults it to `1`** (a server install is reached over a network by definition, and the layer in front of the proxy is the real access gate); set `DSH_ALLOW_REMOTE_SETTINGS=0` to restore upstream behavior. See [Remote browser Settings](#remote-browser-settings). |
 | `DSH_TELEMETRY_DISABLED` | — | Any non-empty value opts out of harness telemetry. |
 | `DSH_QUIET` | — | Silences the container's startup banner. |
 
@@ -600,6 +626,7 @@ untouched on its own loopback-only port.
 | `DSH_WEB_NO_OPEN` | `1` | `dsh web --no-open` | Containers have no browser; set `0` to allow the browser-handoff path. |
 | `DSH_WEB_ARGS` | — | raw extra args | Must start with `-`; passed through to `dsh web` for exotic flags. |
 | `DSH_WORKSPACE` | `/workspace` | process cwd (default workspace) | The in-container path; back it with a volume. |
+| `DSH_ALLOW_REMOTE_SETTINGS` | off / `1` server | client Settings gate | `1` lets a remote browser read/edit the Settings pages (upstream serves them only to loopback pages); `0`/unset = upstream behavior. Server mode defaults to `1`; see [Remote browser Settings](#remote-browser-settings). |
 | `DSH_HOME` | `/home/dsh/.dsh` | harness home | Point at a directory inside your volume if you prefer a dedicated layout. |
 | `DSH_QUIET` | — | container banner | Non-empty silences the startup summary. |
 

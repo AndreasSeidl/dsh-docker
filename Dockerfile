@@ -312,6 +312,7 @@ COPY --exclude=node_modules --exclude='**/*.map' --from=builder --chown=dsh:dsh 
 COPY --chown=dsh:dsh .container/bin/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 COPY --chown=dsh:dsh .container/scripts/heal-workspace-links.mjs \
         .container/scripts/inject-randomuuid-polyfill.mjs \
+        .container/scripts/enable-remote-settings.mjs \
         .container/scripts/reverse-proxy.mjs \
      /usr/local/lib/dsh-container/
 
@@ -335,6 +336,16 @@ RUN node /usr/local/lib/dsh-container/heal-workspace-links.mjs /app
 # inserted before the module bundle so it runs first. This is a container-only
 # enhancement; the harness source is untouched.
 RUN node /usr/local/lib/dsh-container/inject-randomuuid-polyfill.mjs /app/apps/web/dist/index.html
+
+# OR the DSH_ALLOW_REMOTE_SETTINGS flag into the Settings gates of the bundled
+# client (ui-settings persistence + ui-settings-general document controller).
+# Upstream serves Settings only to loopback pages; reverse-proxy.mjs injects
+# the flag into served HTML when DSH_ALLOW_REMOTE_SETTINGS=1 (server mode
+# defaults it on), so a remote browser can then edit providers too. Without
+# the flag the patched bundles behave byte-for-byte like upstream. The script
+# hard-fails if the pinned harness version's bundle bytes no longer match, so
+# a harness bump is surfaced at build time, never silently skipped.
+RUN node /usr/local/lib/dsh-container/enable-remote-settings.mjs /app/packages
 
 # `dsh` -> the built CLI entry, plus make the entrypoint executable.
 RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/node /app/apps/cli/lib/bin.js "$@"' > /usr/local/bin/dsh \

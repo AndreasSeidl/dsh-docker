@@ -246,6 +246,19 @@ if [ "${DSH_SERVER_MODE:-0}" != "0" ]; then
     DSH_WORKSPACE="/workspaces"
     export DSH_WORKSPACE
   fi
+  # A server install is reached over a network by definition, so the GUI's
+  # page hostname is never loopback and upstream deliberately disables the
+  # Settings pages ("settings are unavailable in this browser"). The container
+  # patches the client to honor DSH_ALLOW_REMOTE_SETTINGS instead, and server
+  # mode makes remote Settings available BY DEFAULT: the access gate is the
+  # layer in front of the proxy (Tailscale/TLS/VPN/loopback publish), and the
+  # operator who already reached that gate should be able to edit provider
+  # keys. Set DSH_ALLOW_REMOTE_SETTINGS=0 to restore the upstream
+  # loopback-only behavior.
+  if [ -z "${DSH_ALLOW_REMOTE_SETTINGS:-}" ]; then
+    DSH_ALLOW_REMOTE_SETTINGS=1
+    export DSH_ALLOW_REMOTE_SETTINGS
+  fi
   if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
     if [ ! -e "$DSH_HOME/cordis.patch.yml" ] && [ -f "/opt/dsh/defaults/cordis.patch.yml" ]; then
       cp "/opt/dsh/defaults/cordis.patch.yml" "$DSH_HOME/cordis.patch.yml" 2>/dev/null || true

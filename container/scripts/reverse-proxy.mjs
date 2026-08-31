@@ -25,6 +25,7 @@
 import { createServer, request as httpRequest } from 'node:http'
 import { spawn } from 'node:child_process'
 import net from 'node:net'
+import { brotliCompressSync, brotliDecompressSync, deflateSync, gzipSync, gunzipSync, inflateSync } from 'node:zlib'
 
 // Both in-container ports are FIXED. The PROXY owns 3080 — the port upstream
 // documents and everyone expects — so `docker run -p 3080:3080` and every
@@ -168,6 +169,68 @@ function writeHeadLike(res, status, headers) {
   res.writeHead(status, headers)
 }
 
+// ── DSH_ALLOW_REMOTE_SETTINGS: the remote-GUI Settings gate ──────────────
+// Upstream's Settings pages (provider config, the settings.yaml document) only
+// render for a browser whose page hostname is loopback. A remote origin makes
+// the client build the settings mirror with 'memory' persistence, so the Models
+// store fails with "settings are unavailable in this browser" and the General
+// document tab never mounts. enable-remote-settings.mjs patches the bundled
+// client to ALSO honor an injected flag; this proxy delivers that flag: when
+// DSH_ALLOW_REMOTE_SETTINGS=1 it injects an inline script into every served
+// text/html page. Default OFF — a deployment must ask for it (the entrypoint
+// defaults it on in server mode, where reachability means a network page by
+// definition and the layer in front of this proxy is the real access gate).
+const ALLOW_REMOTE_SETTINGS = String(process.env.DSH_ALLOW_REMOTE_SETTINGS || '').trim() === '1'
+const SETTINGS_FLAG_SCRIPT =
+  '<script>/* dsh-container: DSH_ALLOW_REMOTE_SETTINGS=1 */globalThis.__DSH_ALLOW_REMOTE_SETTINGS__=true;</script>'
+
+// Insert the flag script right before the first module bundle: classic scripts
+// run before deferred module scripts, so every Settings decision sees it. If
+// the marker is ever missing, prepend instead of failing the page.
+function htmlWithFlag(body) {
+  const text = body.toString('utf8')
+  const needle = '<script type="module"'
+  const idx = text.indexOf(needle)
+  const insert = `${SETTINGS_FLAG_SCRIPT}\n`
+  return Buffer.from(idx === -1 ? insert + text : text.slice(0, idx) + insert + text.slice(idx), 'utf8')
+}
+
+// Relay an upstream response, injecting the flag into HTML bodies ONLY when
+// ALLOW_REMOTE_SETTINGS is on (otherwise byte-for-byte pass-through, so the
+// default image serves HTML exactly as upstream builds it). Handles identity
+// and gzip/deflate/br; a compressed transform that fails falls back to the
+// upstream bytes untouched rather than mangling the body.
+function relayResponse(proxyRes, res, headers) {
+  if (!ALLOW_REMOTE_SETTINGS || !String(headers['content-type'] || '').toLowerCase().includes('text/html')) {
+    writeHeadLike(res, proxyRes.statusCode || 502, headers)
+    proxyRes.pipe(res)
+    return
+  }
+  const enc = String(headers['content-encoding'] || '').toLowerCase()
+  const chunks = []
+  proxyRes.on('data', (c) => chunks.push(c))
+  proxyRes.on('error', () => res.destroy())
+  proxyRes.on('end', () => {
+    const original = Buffer.concat(chunks)
+    try {
+      const decoded = enc === 'gzip' ? gunzipSync(original)
+        : enc === 'br' ? brotliDecompressSync(original)
+          : enc === 'deflate' ? inflateSync(original)
+            : original
+      let output = htmlWithFlag(decoded)
+      if (enc === 'gzip') output = gzipSync(output)
+      else if (enc === 'br') output = brotliCompressSync(output)
+      else if (enc === 'deflate') output = deflateSync(output)
+      headers['content-length'] = String(output.length)
+      writeHeadLike(res, proxyRes.statusCode || 502, headers)
+      res.end(output)
+    } catch {
+      writeHeadLike(res, proxyRes.statusCode || 502, headers)
+      res.end(original)
+    }
+  })
+}
+
 // ── HTTP ────────────────────────────────────────────────────────────────
 function forwardHttp(req, res, retried = false) {
   const options = {
@@ -200,8 +263,7 @@ function forwardHttp(req, res, retried = false) {
     // party the page loads (the app sets it on its auth redirects; this makes
     // every served page carry it too).
     if (h['referrer-policy'] === undefined) h['referrer-policy'] = 'no-referrer'
-    writeHeadLike(res, proxyRes.statusCode || 502, h)
-    proxyRes.pipe(res)
+    relayResponse(proxyRes, res, h)
   })
   proxyReq.on('error', (err) => {
     if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain' })
@@ -377,6 +439,9 @@ waitForApp().then((up) => {
   }
   server.listen(PUBLIC_PORT, PUBLIC_HOST, () => {
     console.log(`[dsh-proxy] serving on http://${PUBLIC_HOST}:${PUBLIC_PORT} -> http://${APP_HOST}:${APP_PORT}`)
+    if (ALLOW_REMOTE_SETTINGS) {
+      console.log('[dsh-proxy] DSH_ALLOW_REMOTE_SETTINGS=1: remote-browser Settings enabled (flag injected into served pages)')
+    }
   })
 }).catch((err) => {
   console.error(`[dsh-proxy] startup failed: ${err.message}`)
