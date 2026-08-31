@@ -78,7 +78,7 @@ services:
       # DSH_WEB_AUTH_MODE=trust-proxy makes the bundled proxy exchange the
       # per-run session token itself (no 401/token dance for clients). Set it
       # ONLY when a real access layer sits in front of this container (TLS+auth
-      # edge, VPN, tsdproxy/Tailscale); on a plain 0.0.0.0 publish it opens the
+      # edge, VPN, Tailscale); on a plain 0.0.0.0 publish it opens the
       # GUI to anyone who can reach the port. Default "token" keeps the lock.
       DSH_WEB_AUTH_MODE: "${DSH_WEB_AUTH_MODE:-token}"
 

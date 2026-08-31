@@ -87,7 +87,7 @@ const publicHostWithPort = /:\d+$/.test(PUBLIC_URL_HOST.replace(/^[^@]*@/, ''))
 //                resulting cookie on every forwarded request, so clients never
 //                see a 401 and the printed URL needs no ?token=. This is only
 //                sound when a REAL access layer stands in front of the proxy --
-//                a tsdproxy/Tailscale ACL, a TLS + auth edge, a VPN, or plain
+//                a Tailscale ACL, a TLS + auth edge, a VPN, or plain
 //                loopback. On a plain 0.0.0.0 publish it turns the GUI into an
 //                open agent; do not use it there.
 const TRUST_PROXY = String(process.env.DSH_WEB_AUTH_MODE || '').trim() === 'trust-proxy'
@@ -138,7 +138,7 @@ function armTrustProxy() {
 }
 
 // Busybody note: trust-proxy removes the app's only gate. When the thing in
-// front is real access control (tsdproxy/Tailscale, TLS+auth, VPN) that is the
+// front is real access control (Tailscale, TLS+auth, VPN) that is the
 // point; verify that layer exists before deploying this mode.
 
 // Add the replay cookie to outgoing headers, unless the client already sent one

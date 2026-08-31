@@ -7,7 +7,7 @@
 .pnpm-store/
 *.log
 
-# Machine/deployment-specific experiments (never committed; e.g. tsdproxy compose)
+# Machine/deployment-specific experiments (never committed; e.g. a tailnet deploy compose)
 experiments/
 
 # Local compose configuration (.env.example is tracked)

@@ -38,7 +38,7 @@
 #                web GUI. There is no login — keep the log-printed session token
 #                private, and put TLS / a reverse-proxy auth layer in front
 #                beyond a trusted LAN (or DSH_WEB_AUTH_MODE=trust-proxy when
-#                that layer is a real gate, e.g. tsdproxy/Tailscale).
+#                that layer is a real gate, e.g. Tailscale).
 #
 # Other commands: status | update [local|server] | uninstall [--purge] [..] | help
 #
@@ -318,7 +318,7 @@ ACCESS CONTROL:
   and requests without it get a 401. There is no login screen.
   DSH_WEB_AUTH_MODE=trust-proxy makes the bundled proxy exchange that token
   itself (no 401/token dance) — set it ONLY when a real access layer stands in
-  front (tsdproxy/Tailscale, TLS + auth, VPN). On a plain 0.0.0.0 publish leave
+  front (Tailscale, TLS + auth, VPN). On a plain 0.0.0.0 publish leave
   it at the default "token".
 HELP
 }

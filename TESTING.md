@@ -117,7 +117,7 @@ bundled reverse proxy auto-exchanges the per-run session token:
   the app's session gate.
 
 This is the "the layer in front is the real access control" mode for
-tsdproxy/Tailscale, TLS+auth edges, and VPNs; see the `DSH_WEB_AUTH_MODE`
+Tailscale, TLS+auth edges, and VPNs; see the `DSH_WEB_AUTH_MODE`
 section in the README. The stack comes up on `TRUST_PROXY_TEST_PORT` (default
 3095) and is torn down with its volumes afterward.
 

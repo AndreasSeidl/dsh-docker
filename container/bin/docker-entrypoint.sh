@@ -49,8 +49,8 @@
 #                                      itself and replays the cookie, so there
 #                                      is no 401/token dance — the printed URL
 #                                      is plain. Use ONLY when a real access
-#                                      layer stands in front (tsdproxy/Tailscale
-#                                      ACL, TLS + auth edge, VPN, loopback); on
+#                                      layer stands in front (Tailscale ACL,
+#                                      TLS + auth edge, VPN, loopback); on
 #                                      a plain 0.0.0.0 publish it opens the GUI.
 #
 # NOTE: who may reach the GUI is NOT decided in here. The proxy binds every
@@ -117,7 +117,7 @@ print_boot_banner() {
   if [ "${DSH_WEB_AUTH_MODE:-token}" = "trust-proxy" ]; then
     echo "  Access      delegated: the bundled proxy exchanges the session token" >&2
     echo "              itself — open the \"dsh web:\" URL (no token needed). The" >&2
-    echo "              real gate is the layer in front (tsdproxy/Tailscale, TLS" >&2
+    echo "              real gate is the layer in front (Tailscale ACL, TLS" >&2
     echo "              + auth, VPN). Do NOT trust this on a plain 0.0.0.0 publish." >&2
   else
     echo "  Access      session-locked: open the \"dsh web:\" URL printed in the" >&2
