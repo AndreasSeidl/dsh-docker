@@ -2,20 +2,30 @@
 #
 # dsh-container installer — DeepSeek Harness GUI in Docker.
 #
-# Two ways to run it:
+# ONE mode: the installer always downloads the project files (the two compose
+# templates + the .env.server example) into $DSH_CONTAINER_DIR (default
+# ~/.dsh-container) and runs the stack from there. It never reads deploy files
+# from the current directory — that directory stays yours (it is the LOCAL
+# mode workspace by default), and the installer refuses a configuration in
+# which the install dir would BE the workspace.
 #
-#   1) One line, from anywhere. Fetches the compose files into
-#      $HOME/.dsh-container (override with DSH_CONTAINER_DIR) and runs there:
+# Why: the harness, inside the container, reads a `.env` from the mounted
+# workspace and refuses any DSH_* variable in it (only the launching
+# environment may set those). Keeping the project files + settings `.env` OUT
+# of the workspace makes that collision impossible by construction.
 #
-#        curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \
-#          | sh -s -- local
-#        curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \
-#          | sh -s -- server
+# The one complexity this removes: before v1 the script had a "checkout mode"
+# that reused compose files found in the current directory (e.g. a clone of
+# this repo). That directory was also the default LOCAL workspace, so the
+# installer-written `.env` (full of DSH_*) landed INSIDE the workspace and the
+# container refused to boot. Checkout mode is gone: run the one-liner, or to
+# control the deployment yourself use docker compose / docker run directly
+# (see the README Quick start + Server mode sections).
 #
-#   2) From a checkout of this repository (uses the files right here):
-#
-#        bash scripts/install.sh local
-#        bash scripts/install.sh server
+#   curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \
+#     | sh -s -- local
+#   curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \
+#     | sh -s -- server
 #
 #   LOCAL MODE   harness data + workspace are host directories and the GUI is
 #                served on this machine only (127.0.0.1). Defaults: harness
@@ -38,39 +48,25 @@ fail() { printf 'install: %s\n' "$*" >&2; exit 1; }
 info() { printf 'install: %s\n' "$*"; }
 warn() { printf 'install: %s\n' "$*" >&2; }
 
-# ── Where are the project files? ───────────────────────────────────────────
-# Three cases: the script was invoked from inside a checkout (found through $0
-# or the current directory), or it was piped in with `curl | sh` and the files
-# must be fetched into a dedicated app dir.
-is_checkout() { [ -f "$1/docker-compose.yml" ] && [ -f "$1/docker-compose.server.yml" ] && [ -f "$1/.env.server.example" ]; }
-
-SCRIPT_DIR=""
-case "$0" in
-  */*) SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)" || SCRIPT_DIR="" ;;
-esac
-
-if [ -n "$SCRIPT_DIR" ] && is_checkout "$SCRIPT_DIR"; then
-  APP_DIR="$SCRIPT_DIR"                       # .../scripts/install.sh -> checkout
-  SELF_INSTALL=0
-elif [ -n "$SCRIPT_DIR" ] && is_checkout "$(dirname "$SCRIPT_DIR")"; then
-  APP_DIR="$(dirname "$SCRIPT_DIR")"          # scripts/<name> in a checkout
-  SELF_INSTALL=0
-elif is_checkout "$(pwd)"; then
-  APP_DIR="$(pwd)"                            # files are right here
-  SELF_INSTALL=0
-else
-  APP_DIR="${DSH_CONTAINER_DIR:-$HOME/.dsh-container}"
-  SELF_INSTALL=1
-fi
-
-# The directory the user actually ran the installer from — the LOCAL mode
-# workspace default (for the one-liner that is where they piped it; for a
-# checkout usually the repo root).
+# ── Where do the project files live? ───────────────────────────────────────
+# Always $DSH_CONTAINER_DIR (default ~/.dsh-container); the installer is
+# single-mode and downloads the templates there. $INVOKE_DIR is where the
+# user actually ran the installer from — the LOCAL mode workspace default.
+APP_DIR="$(CDPATH= cd -- "${DSH_CONTAINER_DIR:-$HOME/.dsh-container}" 2>/dev/null && pwd || printf '%s\n' "${DSH_CONTAINER_DIR:-$HOME/.dsh-container}")"
 INVOKE_DIR="$(pwd)"
+norm_dir() { CDPATH= cd -- "$1" 2>/dev/null && pwd || printf '%s\n' "$1"; }
 
-if [ "$SELF_INSTALL" -eq 1 ]; then
+# Guard: the install dir must never BE the workspace. The harness reads the
+# settings `.env` from the workspace root and refuses bootstrap-only (DSH_*)
+# names in it — if the install dir ever equaled the workspace, the container
+# would refuse to start. The default workspace is the directory you ran this
+# from; cmd_local below re-checks any explicit DSH_WORKSPACE_DIR.
+[ "$APP_DIR" != "$INVOKE_DIR" ] || fail \
+  "DSH_CONTAINER_DIR ($APP_DIR) is the same as the directory you are running in — the project files/settings must live OUTSIDE the workspace, or the container will refuse to start. Run from a different directory or set DSH_CONTAINER_DIR."
+
+fetch_files() {
   command -v curl >/dev/null 2>&1 \
-    || fail "the one-line installer needs curl — install curl, or clone the repo and run scripts/install.sh"
+    || fail "the installer needs curl — install curl, or deploy manually with docker compose"
   BASE_URL="${DSH_CONTAINER_BASE_URL:-https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main}"
   mkdir -p "$APP_DIR" || fail "cannot create $APP_DIR"
   # Strict https for the official URL; a custom mirror/fork may be plain http.
@@ -84,20 +80,19 @@ if [ "$SELF_INSTALL" -eq 1 ]; then
     curl -fsSL $CURL_SECURITY --retry 2 "$BASE_URL/$f" -o "$APP_DIR/$f" \
       || fail "could not fetch $f from $BASE_URL (offline? wrong branch?)"
   done
-  info "project files are in $APP_DIR (point later runs there with DSH_CONTAINER_DIR=$APP_DIR)"
-fi
+  info "project files are in $APP_DIR (override with DSH_CONTAINER_DIR=$APP_DIR)"
+}
+
+fetch_files
 
 cd "$APP_DIR" || fail "cannot change into $APP_DIR"
+APP_DIR="$(pwd)"   # normalized
 
-# Compose invocations: a checkout runs exactly as `docker compose …` in the repo
-# root; a self-installed copy pins the project name so volumes/networks keep the
-# same well-known `dsh-container_*` names no matter where the files live.
+# Compose invocations. The project name is pinned so the well-known
+# `dsh-container_*` volume/network names stay stable no matter where the files
+# live (they are always in DSH_CONTAINER_DIR, but never assume that).
 docker_compose() {
-  if [ "$SELF_INSTALL" -eq 1 ]; then
-    docker compose --project-name dsh-container "$@"
-  else
-    docker compose "$@"
-  fi
+  docker compose --project-name dsh-container "$@"
 }
 
 require_compose() {
@@ -120,7 +115,7 @@ access_url() {
 }
 
 # Compose args for SERVER mode. `--env-file` is only passed when the file
-# exists (status/update/uninstall must not fail on a fresh checkout).
+# exists (status/update/uninstall must not fail on a fresh install dir).
 server_args() {
   printf '%s' "-f docker-compose.server.yml"
   [ -f .env.server ] && printf ' %s' "--env-file .env.server"
@@ -129,6 +124,12 @@ server_args() {
 # ── local mode ────────────────────────────────────────────────────────────
 cmd_local() {
   require_compose
+
+  # The workspace must not be the install dir (see the bootstrap guard for the
+  # default; this catches an explicit DSH_WORKSPACE_DIR pointing there).
+  ws_dir="$(norm_dir "${DSH_WORKSPACE_DIR:-$INVOKE_DIR}")"
+  [ "$APP_DIR" != "$ws_dir" ] || fail \
+    "DSH_WORKSPACE_DIR ($ws_dir) is the same as DSH_CONTAINER_DIR ($APP_DIR) — the workspace must not be the install dir (the settings .env would be read by the harness and refused)"
 
   if [ ! -f .env ]; then
     info "writing .env (local mode: this machine only by default)"
@@ -211,7 +212,7 @@ cmd_status() {
     echo "SERVER mode is up: $(access_url dsh-server)  (replace localhost with the server address)"
   fi
   if [ ! -e .env ] && [ ! -e .env.server ]; then
-    echo "nothing installed yet — try:  sh scripts/install.sh local | server"
+    echo "nothing installed yet — try:  curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh | sh -s -- local | server"
   fi
 }
 
@@ -219,18 +220,20 @@ cmd_update() {
   require_compose
   which="${1:-auto}"
   [ "$#" -gt 0 ] && shift
+  # `update` also refreshes the compose templates from upstream, so a new
+  # template (or a fix like this one) reaches existing installs on update.
+  info "refreshing project files in $APP_DIR"
+  fetch_files
+  if [ "$which" = "auto" ]; then
+    if docker inspect dsh-server >/dev/null 2>&1; then which=server
+    elif docker inspect dsh >/dev/null 2>&1; then which=local
+    else fail "no stack is running — pass local or server explicitly"; fi
+  fi
   case "$which" in
     local) docker_compose pull && docker_compose up -d ;;
     server) docker_compose $(server_args) pull && docker_compose $(server_args) up -d ;;
-    auto)
-      if docker inspect dsh-server >/dev/null 2>&1; then cmd_update server
-      elif docker inspect dsh >/dev/null 2>&1; then cmd_update local
-      else fail "no stack is running — pass local or server explicitly"; fi ;;
     *) fail "update takes local, server or auto (got: $which)" ;;
   esac
-  if [ "$SELF_INSTALL" -eq 1 ]; then
-    warn "the compose templates were not re-fetched — run the one-liner again (or git pull) for new versions of those"
-  fi
 }
 
 cmd_uninstall() {
@@ -268,9 +271,13 @@ cmd_help() {
 dsh-container installer — DeepSeek Harness GUI in Docker
 
 USAGE:
-  ./scripts/install.sh <command>          # from a checkout of the repo
   curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh | sh -s -- <command>
-                                          # one line, from anywhere
+
+  The installer downloads the project files into $DSH_CONTAINER_DIR
+  (default ~/.dsh-container) and runs the stack from there. It never changes
+  the directory you run it from (that stays your LOCAL workspace). If you want
+  to control or modify the deployment yourself, use docker compose / docker run
+  directly (see the README).
 
 COMMANDS:
   local              LOCAL MODE — host dirs for harness data + workspace,
@@ -278,24 +285,32 @@ COMMANDS:
   server             SERVER MODE — persistent volumes for harness data +
                      workspaces, LAN/internet access by default (0.0.0.0).
   status             which stack is running and how to reach it.
-  update [mode]      pull the newest image and restart (mode: local|server|auto).
+  update [mode]      refresh templates, pull the newest image, restart
+                     (mode: local|server|auto).
   uninstall [--purge] [mode]   stop; data kept unless --purge (deletes volumes).
   help               this message.
 
-LOCAL DEFAULTS (override via env or edit .env afterwards):
+LOCAL DEFAULTS (override via env or edit the .env in DSH_CONTAINER_DIR):
   DSH_HOME_DIR=~/.dsh        harness data (settings, credentials, history)
   DSH_WORKSPACE_DIR=$PWD     the folder the agent works in
   DSH_BIND_ADDRESS=127.0.0.1 this machine only
   DSH_WEB_PORT=3080
 
-SERVER DEFAULTS (override via env or edit .env.server afterwards):
+SERVER DEFAULTS (override via env or edit the .env.server in DSH_CONTAINER_DIR):
   DSH_BIND_ADDRESS=0.0.0.0   published on every interface — remote access
   DSH_WEB_PORT=3080
   Volumes: dsh-server-home (/home/dsh/.dsh), dsh-server-workspaces (/workspaces)
 
-ONE-LINE (piped) INSTALLS:
-  DSH_CONTAINER_DIR=~/.dsh-container   where the compose files are fetched
+INSTALL DIR:
+  DSH_CONTAINER_DIR=~/.dsh-container   where the project files live
   DSH_CONTAINER_BASE_URL=...           mirror/fork base URL for the files
+
+NOTES:
+  The settings .env must never live IN the workspace: the harness reads an
+  optional .env from the workspace and refuses DSH_* variables there (only the
+  launching environment may set them) — the installer keeps its .env in
+  DSH_CONTAINER_DIR (never mounted) and refuses an install dir that would be
+  the workspace.
 
 ACCESS CONTROL:
   The harness uses the port upstream documents (3080) inside the container; the

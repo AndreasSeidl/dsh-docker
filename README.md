@@ -24,10 +24,11 @@ Settings page and you're in.
 
 ## Install — one line, or the manual Docker way
 
-There are two ways to get it running, and the **manual Docker Compose route
-below is the default, documented way**. The one-liner below is a convenience:
-it fetches the Compose files itself (into `~/.dsh-container`; override with
-`DSH_CONTAINER_DIR`) and runs the exact same installer.
+There are two ways to get it running:
+
+- **The one-liner installs without any modification.** It downloads the Compose
+  files into `~/.dsh-container` (override with `DSH_CONTAINER_DIR`) and runs
+  that exact stack — zero configuration, safe defaults:
 
 ```sh
 # Local mode — this machine only; ~/.dsh for harness data, the folder you're
@@ -40,10 +41,15 @@ curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/script
   | sh -s -- server
 ```
 
-Manual routes: clone the repo and run `bash scripts/install.sh local | server`,
-or follow the plain `docker compose` / `docker run` steps under
-[Quick start](#quick-start) and [Server mode](#server-mode) below — Compose
-files are `docker-compose.yml` (local) and `docker-compose.server.yml` (server).
+- **The manual Docker way is for when you want to modify what actually
+  happens** — clone the repo (or just fetch the Compose files) and run
+  `docker compose` / `docker run` yourself, editing as you go. The installer
+  deliberately does **not** reuse files from a checkout: even when you run it
+  from a clone, it downloads its own copy into `~/.dsh-container`, so your
+  directory (the LOCAL workspace) is never tangled up with the installer's
+  settings. Manual steps are under [Quick start](#quick-start) and
+  [Server mode](#server-mode) below — Compose files are `docker-compose.yml`
+  (local) and `docker-compose.server.yml` (server).
 
 ---
 
@@ -53,13 +59,18 @@ Everything is one Docker image; what differs is how the harness data and the
 workspaces are stored, and who can reach the GUI. There is an installer for
 each:
 
-| | **Local mode** (`bash scripts/install.sh local`) | **Server mode** (`bash scripts/install.sh server`) |
+| | **Local mode** (`install.sh local`) | **Server mode** (`install.sh server`) |
 |---|---|---|
 | What it's for | You, on this machine, running the GUI in Docker | A machine on your network that you reach from somewhere else |
 | Harness data (settings, credentials, history) | A **host directory** (default `~/.dsh` — shared with a native `dsh` install if you have one) | A **named volume** (`dsh-server-home`) |
 | Workspaces | A **host directory** (default the folder you run the installer from) | A **named volume** (`dsh-server-workspaces`) holding one directory per workspace, created in the GUI |
 | Published on | `127.0.0.1` — **this machine only** | `0.0.0.0` — **LAN by default** |
 | Compose file | `docker-compose.yml` | `docker-compose.server.yml` |
+
+`install.sh local` / `install.sh server` here just abbreviate the one-liner in
+the [Install](#install--one-line-or-the-manual-docker-way) section — the
+installer always downloads its own project files into `~/.dsh-container` and
+runs from there, whichever form you type.
 
 Both run the same hardened container (read-only root filesystem, no
 capabilities, no privilege escalation). The GUI is always the same
@@ -130,11 +141,12 @@ lock, so prefer leaving it unless you know what is in front.
 This runs the GUI on **this machine only**. The scripts below are what
 **Local mode** means; the same image is also used for [Server mode](#server-mode).
 
-Fastest path (writes the `.env` for you — harness data in `~/.dsh`, the agent
-works in the current directory, GUI on `127.0.0.1`):
+Fastest path (downloads its own Compose files and writes the `.env` for you —
+harness data in `~/.dsh`, the agent works in the current directory, GUI on
+`127.0.0.1`):
 
 ```sh
-bash scripts/install.sh local
+curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh | sh -s -- local
 ```
 
 Or one of the manual routes:
@@ -196,9 +208,9 @@ and the GUI is **published on every interface by default** (`0.0.0.0`), because
 the whole point is remote access.
 
 ```sh
-bash scripts/install.sh server
-# → creates .env.server (add your API key there), starts the stack, and tells
-#   you how to find the access URL
+curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh | sh -s -- server
+# → downloads the Compose files, creates .env.server (add your API key there),
+#   starts the stack, and tells you how to find the access URL
 ```
 
 `docker-compose.server.yml` sets up one container (`dsh-server`) with two
@@ -294,7 +306,7 @@ the whole server.
 | add your provider key | edit `.env.server`, then `docker compose -f docker-compose.server.yml --env-file .env.server up -d` |
 | stop (data kept) | `docker compose -f docker-compose.server.yml down` |
 | fresh slate (⚠️ deletes everything) | `docker compose -f docker-compose.server.yml down -v` |
-| update the image | `bash scripts/install.sh update server` |
+| update the image | `curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \| sh -s -- update server` |
 | shell inside | `docker exec -it dsh-server bash` |
 
 ---
@@ -337,8 +349,10 @@ already maps ownership for you.)
 
 ## Settings you might actually change
 
-All of these are environment variables. With Compose, put them in `.env`
-(copy [.env.example](.env.example)); with `docker run`, pass them as `-e NAME=value`.
+All of these are environment variables. With the one-liner they are written for
+you into `~/.dsh-container/.env` (local) / `.env.server` (server). With manual
+Compose, put them in a `.env` next to your compose files (copy
+[.env.example](.env.example)); with `docker run`, pass them as `-e NAME=value`.
 
 | Variable | Default | What it does |
 |---|---|---|
@@ -365,11 +379,14 @@ All of these are environment variables. With Compose, put them in `.env`
 > so they may only be supplied by the **launching** environment — compose
 > `environment:`, `docker run -e`, or an exported shell variable. That is why
 > the shipped compose files pass every `DSH_*` setting through the container
-> environment rather than a `.env` file. Rule of thumb: an `.env` in the
+> environment rather than a `.env` file. Rule of thumb: an `.env` inside the
 > *workspace* folder is for plain user settings (e.g. `DEEPSEEK_API_KEY`); keep
-> `DSH_*` (and the other listed names) out of it. `install.sh local` currently
-> writes a `.env` containing `DSH_*` into the folder you run it from — when that
-> folder is also the workspace, the boot refuses it (see Troubleshooting).
+> `DSH_*` and the other listed names out of it. The one-liner is already safe:
+> it keeps its settings `.env` in `~/.dsh-container` (never mounted into the
+> container) and refuses an install dir that would be the workspace — so only a
+> `.env` you keep in the workspace yourself can ever hit this (see
+> Troubleshooting). A `.env.example` copied next to your own compose files is
+> fine as long as that folder isn't also mounted as the workspace.
 
 Changing which port you open takes one variable:
 
@@ -387,13 +404,13 @@ See [all variables](#all-environment-variables) for the complete list.
 
 | I want to… | Command |
 |---|---|
-| install/start Local mode | `bash scripts/install.sh local` (or `docker compose up -d`) |
-| install/start Server mode | `bash scripts/install.sh server` (or `docker compose -f docker-compose.server.yml --env-file .env.server up -d`) |
+| install/start Local mode | `curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \| sh -s -- local` (or `docker compose up -d`) |
+| install/start Server mode | `curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \| sh -s -- server` (or `docker compose -f docker-compose.server.yml --env-file .env.server up -d`) |
 | see what it's doing | `docker logs -f dsh` (local) / `docker logs -f dsh-server` (server) |
 | get the access URL (session token) | `docker logs dsh \| grep 'dsh web:'` (local) / `... dsh-server \| grep 'dsh web:'` (server) |
 | stop it (keeping data) | `docker stop dsh` / `docker compose down` (local) — server: `docker compose -f docker-compose.server.yml down` |
 | start it again | `docker start dsh` / `docker compose up -d` (local) — server: `... -f docker-compose.server.yml up -d` |
-| update to the newest image | `bash scripts/install.sh update` (pulls and restarts whatever is running) |
+| update to the newest image | `curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh \| sh -s -- update` (refreshes templates, pulls, restarts whatever is running) |
 | get a shell inside | `docker exec -it dsh bash` (local) / `docker exec -it dsh-server bash` (server) |
 | install a plugin | `docker exec -it dsh dsh plugin --profile web add <package>` |
 | run a one-shot task | `docker exec -it dsh dsh --profile headless "run the tests"` |
@@ -409,11 +426,13 @@ See [all variables](#all-environment-variables) for the complete list.
 harness refuses bootstrap-only variables — every `DSH_*` name plus a fixed list
 (`DEEPSEEK_BASE_URL`, proxies, `PYTHONPATH`, …) — from any `.env` it loads as a
 workspace/home config layer; they may only come from the process environment
-(`-e`, compose `environment:`, shell export). This is exactly what `install.sh
-local` runs into when the folder it writes `.env` into is also the workspace.
-Fix: remove the `DSH_*` lines from that `.env` (or the file) and pass the
-settings another way — e.g. `DSH_WEB_PORT=9000 docker compose up -d` or by
-editing `docker-compose.yml`'s `environment:` — then restart.
+(`-e`, compose `environment:`, shell export). The installer keeps its `.env` in
+`~/.dsh-container` and refuses an install dir equal to the workspace, so this
+only happens if you yourself have placed a `.env` containing `DSH_*` inside the
+workspace (e.g. copied `.env.example` there). Fix: remove the `DSH_*` lines
+from that `.env` (or the file) and pass the settings another way — e.g.
+`DSH_WEB_PORT=9000 docker compose up -d` or by editing the compose
+`environment:` — then restart.
 
 **Port 3080 is already in use.** Pick another host port: `DSH_WEB_PORT=9000
 docker compose up -d`, or `-p 9000:3080` with `docker run`.

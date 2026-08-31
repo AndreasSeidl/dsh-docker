@@ -17,8 +17,8 @@
 #      and replace "localhost" with this server's address:
 #        docker compose -f docker-compose.server.yml logs dsh-server | grep 'dsh web:'
 #
-# Or run the installer (it creates .env.server for you):
-#   bash scripts/install.sh server
+# Or run the installer (it downloads this file and creates .env.server for you):
+#   curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh | sh -s -- server
 #
 # Settings live in a .env.server file next to this one (see .env.server.example):
 #   DEEPSEEK_API_KEY   your provider key (or set it later in the GUI Settings)

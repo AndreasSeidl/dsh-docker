@@ -6,7 +6,7 @@
 # your network can reach it, by default.
 #
 # For a SERVER the machine runs on 24/7 and is accessed remotely, use
-# docker-compose.server.yml instead (or `bash scripts/install.sh server`):
+# docker-compose.server.yml instead (or the installer's `server` command):
 # persistent volumes for harness data AND workspaces, LAN access by default.
 #
 #   1. (optional) cp .env.example .env   and put your API key in it
@@ -30,8 +30,9 @@
 #                      (default: the private `dsh-workspace` volume)
 #   DSH_TAG            image version to run                      (default latest)
 #
-# The quickest local setup is the installer, which writes these for you:
-#   bash scripts/install.sh local          # ~/.dsh + the current directory
+# The quickest local setup is the installer — it downloads this file into
+# ~/.dsh-container and writes the settings for you:
+#   curl -LsSf https://raw.githubusercontent.com/AndreasSeidl/dsh-docker/main/scripts/install.sh | sh -s -- local
 #
 # Ports: the GUI is served on 3080, the port the harness's own docs use, so
 # anything written for upstream applies here. (`dsh web` itself runs behind the
