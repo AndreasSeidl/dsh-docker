@@ -113,9 +113,9 @@ port you publish, so the printed URL points at the right place.
 
 Once a **real access layer** stands in front of the GUI, the per-run token is
 redundant — its only job is gating "anyone who can reach the port". If that
-layer is a genuine boundary (a tsdproxy/Tailscale ACL in front on the tailnet,
-a TLS + Basic Auth reverse proxy, a VPN, or plain loopback), you can drop the
-token entirely so clients get a clean, stable URL with no 401/token dance:
+layer is a genuine boundary (a TLS + Basic Auth reverse proxy, a VPN, or plain
+loopback), you can drop the token entirely so clients get a clean, stable URL
+with no 401/token dance:
 
 ```sh
 DSH_WEB_AUTH_MODE=trust-proxy
@@ -125,14 +125,16 @@ In this mode the bundled reverse proxy does the token exchange itself (once at
 boot, again if a 30-day cookie ever expires) and replays the session cookie on
 every request — the printed `dsh web:` line carries no `?token=`, and any
 browser that can reach the proxy is in. That is the point: **the thing in front
-is the access control now**. This is exactly the setup for Tailscale +
-[tsdproxy](https://github.com/alcheckoverflow/tsdproxy) (expose the container on
-the tailnet, let the tailnet ACL + TLS be the boundary, set
-`DSH_PUBLIC_URL=https://<name>.<tailnet>.ts.net`).
+is the access control now**. If that layer speaks TLS, set `DSH_PUBLIC_URL` to
+the HTTPS origin clients actually use, so the printed URL and redirects are
+honest.
 
-It is also a footgun: on a plain `0.0.0.0` publish (no such layer), `trust-proxy`
-hands the GUI to anyone who can reach the port — the default `token` keeps the
-lock, so prefer leaving it unless you know what is in front.
+Remember: **LAN access is by definition insecure**. A plain publish on your LAN
+has no login — only the per-boot token — and any machine on that network is a
+potential attacker. `trust-proxy` is only safe because the real boundary sits
+in front; on a plain `0.0.0.0` publish (no such layer) it hands the GUI to
+anyone who can reach the port. The default `token` keeps the lock, so prefer
+leaving it unless you know what is in front.
 
 ---
 
@@ -395,7 +397,7 @@ Compose, put them in a `.env` next to your compose files (copy
 | `DEEPSEEK_BASE_URL` | — | Point at a compatible endpoint instead of api.deepseek.com. |
 | `DSH_WEB_PORT` | `3080` | The port on **your** machine — it is what the startup banner prints. With Compose it also sets the `-p` mapping. With `docker run` you choose it in `-p <port>:3080`; add `-e DSH_WEB_PORT=<port>` so the banner matches. |
 | `DSH_PUBLIC_URL` | — | *(Server mode)* Origin remote clients actually reach (e.g. `http://192.168.1.5:3080` or `https://harness.example`). When set, the printed tokenized "dsh web:" URL uses it instead of `http://localhost:DSH_WEB_PORT`, so the URL is clickable from another machine. |
-| `DSH_WEB_AUTH_MODE` | `token` | How the per-run session token is handled. `token` (default) keeps the app's `401`/token dance. `trust-proxy` makes the bundled proxy exchange the token itself — no 401, no token URL, the printed URL is clean. Set it **only** when a real access layer stands in front (tsdproxy/Tailscale, TLS+auth edge, VPN, loopback); on a plain `0.0.0.0` publish it opens the GUI to anyone who can reach the port. See [Skip the token](#skip-the-session-token-trust-the-layer-in-front). |
+| `DSH_WEB_AUTH_MODE` | `token` | How the per-run session token is handled. `token` (default) keeps the app's `401`/token dance. `trust-proxy` makes the bundled proxy exchange the token itself — no 401, no token URL, the printed URL is clean. Set it **only** when a real access layer stands in front (TLS+auth edge, VPN, loopback); on a plain `0.0.0.0` publish it opens the GUI to anyone who can reach the port — **LAN access is by definition insecure**. See [Skip the token](#skip-the-session-token-trust-the-layer-in-front). |
 | `DSH_BIND_ADDRESS` | `127.0.0.1` local / `0.0.0.0` server | The address the GUI is published on. Local mode default means this machine only; **server mode defaults to `0.0.0.0`** (see [Server mode](#server-mode)). |
 | `DSH_HOME_DIR` | volume | *(Local compose only)* Host folder for the harness data, e.g. `~/.dsh` to share with a native install. Server mode always uses the `dsh-server-home` volume. |
 | `DSH_WORKSPACE_DIR` | volume | *(Local compose only)* Host folder the agent works in, e.g. `./my-project`. Server mode always uses the `dsh-server-workspaces` volume at `/workspaces`. |
