@@ -354,6 +354,23 @@ All of these are environment variables. With Compose, put them in `.env`
 | `DSH_TELEMETRY_DISABLED` | — | Any non-empty value opts out of harness telemetry. |
 | `DSH_QUIET` | — | Silences the container's startup banner. |
 
+> **`DSH_*` variables are refused from a `.env` file (by design).** Inside the
+> container the `dsh` CLI loads an optional `.env` from the workspace layer
+> (the invoking directory) and from the harness home. It hard-refuses any
+> **bootstrap-only** variable there: every `DSH_*` name, plus a fixed list
+> (`DEEPSEEK_BASE_URL`, `HTTP(S)_PROXY`, `PYTHONPATH`, `NODE_OPTIONS`, …), with
+> an error like
+> `/workspace/.env sets "DSH_BIND_ADDRESS", which only the launching environment may set`.
+> Those variables decide *how the process starts or how it reaches the network*,
+> so they may only be supplied by the **launching** environment — compose
+> `environment:`, `docker run -e`, or an exported shell variable. That is why
+> the shipped compose files pass every `DSH_*` setting through the container
+> environment rather than a `.env` file. Rule of thumb: an `.env` in the
+> *workspace* folder is for plain user settings (e.g. `DEEPSEEK_API_KEY`); keep
+> `DSH_*` (and the other listed names) out of it. `install.sh local` currently
+> writes a `.env` containing `DSH_*` into the folder you run it from — when that
+> folder is also the workspace, the boot refuses it (see Troubleshooting).
+
 Changing which port you open takes one variable:
 
 ```sh
@@ -387,6 +404,16 @@ See [all variables](#all-environment-variables) for the complete list.
 ---
 
 ## Troubleshooting
+
+**`<path>/.env sets "DSH_…", which only the launching environment may set`.** The
+harness refuses bootstrap-only variables — every `DSH_*` name plus a fixed list
+(`DEEPSEEK_BASE_URL`, proxies, `PYTHONPATH`, …) — from any `.env` it loads as a
+workspace/home config layer; they may only come from the process environment
+(`-e`, compose `environment:`, shell export). This is exactly what `install.sh
+local` runs into when the folder it writes `.env` into is also the workspace.
+Fix: remove the `DSH_*` lines from that `.env` (or the file) and pass the
+settings another way — e.g. `DSH_WEB_PORT=9000 docker compose up -d` or by
+editing `docker-compose.yml`'s `environment:` — then restart.
 
 **Port 3080 is already in use.** Pick another host port: `DSH_WEB_PORT=9000
 docker compose up -d`, or `-p 9000:3080` with `docker run`.
