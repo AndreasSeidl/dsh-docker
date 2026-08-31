@@ -223,11 +223,16 @@ function forwardUpgrade(req, socket, head) {
   }
   const proxyReq = httpRequest(options)
   proxyReq.on('upgrade', (proxyRes, proxySocket, proxyHead) => {
+    // A 101 response only means "we switched protocols" if it actually names the
+    // protocol: the Upgrade/Connection/Sec-WebSocket-Accept headers ARE the
+    // contract. Forward the app's headers byte-for-byte. Omitting them broke
+    // strict fronts (Go's net/http/httputil.ReverseProxy — the proxy tsdproxy
+    // uses — rejects a 101 with an empty Upgrade header:
+    //   "backend tried to switch protocol \"\" when \"websocket\" was requested"
+    // → 502 on every WebSocket relay, e.g. /api/remote.mux).
     socket.write('HTTP/1.1 101 Switching Protocols\r\n')
     for (const [key, value] of Object.entries(proxyRes.headers)) {
-      if (key !== 'upgrade' && key !== 'connection') {
-        socket.write(`${key}: ${value}\r\n`)
-      }
+      socket.write(`${key}: ${value}\r\n`)
     }
     socket.write('\r\n')
     socket.on('error', () => proxySocket.destroy())
