@@ -350,7 +350,7 @@ All of these are environment variables. With Compose, put them in `.env`
 | `DSH_BIND_ADDRESS` | `127.0.0.1` local / `0.0.0.0` server | The address the GUI is published on. Local mode default means this machine only; **server mode defaults to `0.0.0.0`** (see [Server mode](#server-mode)). |
 | `DSH_HOME_DIR` | volume | *(Local compose only)* Host folder for the harness data, e.g. `~/.dsh` to share with a native install. Server mode always uses the `dsh-server-home` volume. |
 | `DSH_WORKSPACE_DIR` | volume | *(Local compose only)* Host folder the agent works in, e.g. `./my-project`. Server mode always uses the `dsh-server-workspaces` volume at `/workspaces`. |
-| `DSH_TAG` | `latest` | *(Compose only)* Image version: `latest`, `nightly`, or a pinned release. |
+| `DSH_TAG` | `latest` | *(Compose only)* Image version: `latest` or a pinned release like `0.1.2-alpha.2`. |
 | `DSH_TELEMETRY_DISABLED` | — | Any non-empty value opts out of harness telemetry. |
 | `DSH_QUIET` | — | Silences the container's startup banner. |
 
@@ -586,14 +586,14 @@ filesystem is additionally read-only.
 <summary><b>Picking a tag</b></summary>
 
 - **`:latest`** — the latest *published release*. What you want to try it out.
-- **`:<version>`** — a pinned release, e.g. `0.1.1-rc.2`. Pin this in production.
-- **`:nightly`** — a weekly rebuild of the harness's default branch.
+- **`:<version>`** — a pinned release, e.g. `0.1.2-alpha.2`. Pin this in production.
 
 New upstream releases are picked up automatically: the container repo polls
 for upstream `dsh-v*` releases every hour and, when a newer one exists, builds
 and publishes both architectures under its version plus `:latest` — no manual
 tag push needed. With a pinned `:<version>` you stay on exactly that release
-until you choose to bump it.
+until you choose to bump it. (There is no `:nightly` — only real upstream
+releases are ever published.)
 
 ```sh
 DSH_TAG=0.1.1-rc.2 docker compose up -d

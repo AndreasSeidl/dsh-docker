@@ -43,14 +43,17 @@ release branch juggling.
   them with the versions already on GHCR, and when a newer one is not yet
   published calls this workflow (via `workflow_call`) with that exact version.
   The check is one tiny job when there is nothing new; only a genuinely new
-  upstream tag starts the multi-arch build, and a tag whose per-arch build is
-  already in flight is never re-triggered. Upstream currently releases
-  everything as a prerelease (`dsh-v0.1.2-alpha.2`), so the poller looks at
-  *all* `dsh-v*` tags rather than GitHub's `releases/latest` (which is empty
-  until a stable ships);
-- **weekly (Mon 03:30 UTC)** — rebuilds the upstream default branch as
-  `ghcr.io/<owner>/dsh-docker:nightly`;
-- **manually** — `workflow_dispatch` accepts a `version` (tag or commit) input.
+  upstream tag starts the multi-arch build, and while a `docker-publish` run is
+  already in progress the tick is skipped so the newest release is never built
+  twice. Upstream currently releases everything as a prerelease
+  (`dsh-v0.1.2-alpha.2`), so the poller looks at *all* `dsh-v*` tags rather than
+  GitHub's `releases/latest` (which is empty until a stable ships);
+- **manually** — `workflow_dispatch` accepts a `version` (tag or commit) input;
+  leave it empty to build the **newest upstream release**.
+
+There is deliberately **no schedule** and no `nightly` tag: only real upstream
+releases are ever published (under `<version>`, with `:latest` aliasing the
+newest one). A plain "rolling default branch" build is never pushed.
 
 No PAT is needed: the poller queries upstream over git and GHCR with an
 anonymous pull-scope token, and invokes the publish workflow as a reusable
@@ -62,21 +65,22 @@ had.
 job matrix (`ubuntu-latest` for amd64, the `ubuntu-24.04-arm` hosted ARM runner
 for arm64) builds each platform in parallel — no QEMU — and a `merge` job joins
 them into one multi-arch manifest with `docker buildx imagetools create`
-(published under `<version>`/`latest`, or `nightly`). Earlier versions
-cross-built arm64 with QEMU, which is ~1 h cold and made the arm64 leg look
-stuck; native building removed that. Tags in the recipe repo and harness
-versions map 1:1 (`v`-prefix optional).
+(published under `<version>`, with `latest` aliasing the newest release).
+Earlier versions cross-built arm64 with QEMU, which is ~1 h cold and made the
+arm64 leg look stuck; native building removed that. Tags in the recipe repo and
+harness versions map 1:1 (`v`-prefix optional).
 
 The per-arch builds push under **throwaway** `dsh-int-<arch>-<run-id>` tags
 purely as a handle for the merge step; after the multi-arch index is created
 the merge job deletes those versions via the GitHub REST API, so GHCR keeps
-only the versioned **multi-arch** rows (`<version>`, `latest`, `nightly`) —
-not `<version>-amd64`/`<version>-arm64` rows. (The platform *images*
-themselves unavoidably still appear as untagged digest rows: a multi-arch
-index must reference them in the same package, and GHCR lists every manifest.
-That is true of every multi-arch container on GHCR/Docker Hub.) If the merge
-job's in-workflow cleanup hits a permission wall, it logs a warning and the
-`dsh-int-*` versions can be deleted manually in the GHCR UI.
+only the versioned **multi-arch** rows (`<version>` + `latest`) — not
+`<version>-amd64`/`<version>-arm64` rows. (The platform *images* themselves
+unavoidably still appear as untagged digest rows: a multi-arch index must
+reference them in the same package, and GHCR lists every manifest. That is true
+of every multi-arch container on GHCR/Docker Hub.) If the merge job's
+in-workflow cleanup hits a permission wall, it logs a warning and the leftover
+`dsh-int-*` versions can be deleted with the `prune-ghcr` workflow (or manually
+in the GHCR UI).
 
 CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
 `mode=max` and a per-arch `scope` so the builder stages stay warm between runs.
@@ -88,8 +92,8 @@ versions also exported a `type=registry` cache tagged `<image>:buildcache` on
 GHCR — that one is **additive with no automatic size eviction** and would have
 accumulated cache blobs on GHCR indefinitely (the registry analogue of the
 bounded-on-the-host cache problem in [DEVELOPMENT.md](DEVELOPMENT.md)), so it
-was removed. The weekly `nightly` build tolerates an occasional cold-start if
-the 7-day TTL evicts the cache first.
+was removed. Runs are infrequent (only on real upstream releases), so an
+occasional cold start when the 7-day TTL evicts the cache first is fine.
 
 > **Why some published tags show an `unknown/unknown` platform.** Builds before
 > the `provenance: false` change were pushed by `docker/build-push-action` with

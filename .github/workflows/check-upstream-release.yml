@@ -1,4 +1,4 @@
-# Auto-publish when upstream releases a new version.
+# Auto-publish upstream releases to GHCR.
 #
 # Upstream (deepseek-ai/deepseek-harness) tags every release as `dsh-v<ver>`
 # (e.g. dsh-v0.1.2-alpha.2), always as a PRERELEASE in the current cycle, so
@@ -7,17 +7,19 @@
 #
 #   1. every hour (17 min past, to spread load) list ALL upstream release tags
 #      `refs/tags/dsh-v*`;
-#   2. list the version tags already published on GHCR;
-#   3. if the newest upstream tag is not yet published (and no per-arch build of
-#      it is in flight), call the docker-publish workflow with that exact
-#      version — it builds both archs natively and pushes `<version>` + `latest`.
+#   2. list the version tags already published on GHCR (real version rows only
+#      — `latest` and the throwaway `dsh-int-*` per-arch build tags are not
+#      versions);
+#   3. skip the tick while a docker-publish run is already in progress (so the
+#      newest release is only ever built once);
+#   4. otherwise, if the newest upstream tag is not yet published, call the
+#      docker-publish workflow with that exact version — it builds both archs
+#      natively and pushes `<version>` + `latest`.
 #
 # When there is nothing new the run is ONE tiny check job (a git ls-remote +
-# a small registry query, a few seconds of runner time) — no build is started.
-# Only a genuinely new upstream release tag triggers the expensive multi-arch
-# build, and never twice: a per-arch in-flight tag (`<version>-amd64`) is
-# treated as "already on it". Runs on the default branch; `workflow_dispatch`
-# lets you force a re-check without waiting for the hour.
+# a small registry query + one Actions API call, a few seconds of runner time)
+# — no build is started. Runs on the default branch; `workflow_dispatch` lets
+# you force a re-check without waiting for the hour.
 name: check-upstream-release
 
 on:
@@ -42,6 +44,7 @@ jobs:
         id: diff
         env:
           PKG: ${{ github.repository }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           LOWER="${PKG,,}"                            # owner/name lowercase (GHCR)
@@ -54,24 +57,43 @@ jobs:
 
           echo "== tags currently on GHCR =="
           # Public package -> anonymous pull-scope token is enough, no repo token.
-          TOKEN="$(curl -fsS "https://ghcr.io/token?scope=repository:${LOWER}:pull" \
+          TOKEN2="$(curl -fsS --max-time 20 "https://ghcr.io/token?scope=repository:${LOWER}:pull" \
                      | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')"
-          curl -fsS -H "Authorization: Bearer $TOKEN" \
+          curl -fsS --max-time 20 -H "Authorization: Bearer $TOKEN2" \
                "https://ghcr.io/v2/${LOWER}/tags/list?n=500" > tags.json
 
-          # Build iff the newest upstream tag is not already published and no
-          # per-arch build of it is in flight.
+          echo "== is docker-publish already running? =="
+          curl -fsS --max-time 20 -H "Authorization: Bearer $TOKEN" \
+               "https://api.github.com/repos/${PKG}/actions/runs?status=in_progress&per_page=100" > runs.json
+
+          # Build iff the newest upstream tag is a real version not yet on
+          # GHCR, and no docker-publish run is currently building it.
           BUILD="$(python3 - "$UP" <<'PYEOF'
           import json, sys
           up = sys.argv[1]
-          tags = json.load(open("tags.json")).get("tags", [])
-          published, inflight = set(), set()
-          for t in tags:
-              if t.endswith(("-amd64", "-arm64")):
-                  inflight.add(t[:-6])          # a <ver>-amd64 tag = build of <ver> running
-              elif t not in ("latest", "nightly"):
-                  published.add(t)
-          print("true" if up and up not in published and up not in inflight else "false")
+          if not up:
+              print("false")
+          else:
+              tags = json.load(open("tags.json")).get("tags", [])
+              # Real versions only. `latest`, `nightly`, the dsh-int-* throwaway
+              # per-arch build tags, and any <ver>-amd64/-arm64 row are NOT
+              # versions.
+              garbage = {"latest", "nightly"}
+              versions = {t for t in tags
+                          if t not in garbage
+                          and not t.startswith("dsh-int-")
+                          and not t.endswith(("-amd64", "-arm64"))}
+              try:
+                  inflight = any(r.get("name") == "docker-publish"
+                                 for r in json.load(open("runs.json")).get("workflow_runs", []))
+              except Exception:
+                  inflight = False
+              if inflight:
+                  print("false")          # a publish is running right now — revisit next tick
+              elif up in versions:
+                  print("false")
+              else:
+                  print("true")
           PYEOF
           )"
           if [ "$BUILD" = "true" ]; then
