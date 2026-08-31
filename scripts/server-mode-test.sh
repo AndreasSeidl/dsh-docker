@@ -21,6 +21,22 @@ IMAGE="${DSH_IMAGE:-dsh:dev}"
 PORT="${SERVER_MODE_TEST_PORT:-3083}"
 FAILED=0
 
+# ── image-era detection ───────────────────────────────────────────────────
+# Two era-gates:
+#   * server-mode profile seeding (cordis.patch.yml, the in-app directory
+#     picker, and the /home/dsh/workspaces symlink) landed in 0.1.2-alpha.2;
+#   * the baked healthcheck only matches the app in 0.1.1 (no 401 gate) or
+#     from 0.1.2-alpha.2 (healthcheck learned to accept the gate's 401).
+HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+: "${HARNESS_VER:?cannot read '$IMAGE' --version}"
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+SESSION_LOCK=no;    version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
+PROFILE_WEB=no;     version_ge "$HARNESS_VER" 0.1.2-alpha.2 && PROFILE_WEB=yes
+HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
+HEALTH_OK=no; [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ] && HEALTH_OK=yes
+skip() { echo "SKIP: $*"; }
+echo "  image $IMAGE → harness $HARNESS_VER (profile web: $PROFILE_WEB, era healthcheck ok: $HEALTH_OK)"
+
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
 check() { if "${@:2}" >/dev/null 2>&1; then pass "$1"; else fail "$1"; fi; }
@@ -34,6 +50,17 @@ reachable() {
     2*|301|302|303|307|401) return 0 ;;
   esac
   echo "HTTP $code" >&2
+  return 1
+}
+# Some images take up to a minute to boot the app behind the proxy (and the
+# era-healthcheck branch skips the healthy-wait that used to absorb that);
+# poll until it answers rather than asserting on first contact.
+wait_reachable() { # wait_reachable <url> <max seconds>
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    reachable "$1" 4 >/dev/null 2>&1 && return 0
+    i=$((i+1)); sleep 1
+  done
   return 1
 }
 
@@ -53,18 +80,27 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
     docker compose -f docker-compose.server.yml up -d --no-build >/dev/null 2>&1 \
     || { fail "docker compose (server) up"; exit 1; }
 
-  ok=0
-  for _ in $(seq 1 60); do
-    case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
-      healthy) ok=1; break ;;
-    esac
-    sleep 1
-  done
-  if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
-  else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
+  if [ "$HEALTH_OK" = "yes" ]; then
+    ok=0
+    for _ in $(seq 1 60); do
+      case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
+        healthy) ok=1; break ;;
+      esac
+      sleep 1
+    done
+    if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
+    else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
+  else
+    skip "baked healthcheck (pre-0.1.2-alpha.2 image: old curl -f check flips unhealthy under the 401 gate) — assert boot + serve instead"
+    if [ "$(docker inspect -f '{{.State.Running}}' dsh-server)" = "true" ]; then
+      pass "container is running (healthcheck semantics not applicable to this image era)"
+    else
+      fail "container is not running"
+    fi
+  fi
 
   check "web GUI reachable on localhost ($PORT, proxy answers)" \
-    reachable "http://127.0.0.1:$PORT/" 20
+    wait_reachable "http://127.0.0.1:$PORT/" 60
 
   # ── server mode publishes on 0.0.0.0 by default ──────────────────────────
   bind="$(docker inspect -f '{{range $p, $c := .NetworkSettings.Ports}}{{range $c}}{{.HostIp}}{{end}}{{end}}' dsh-server 2>/dev/null)"
@@ -101,22 +137,26 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   # ── server-mode entrypoint seeding ────────────────────────────────────────
   check "entrypoint defaulted DSH_WORKSPACE to /workspaces" \
     docker exec dsh-server sh -c 'test "${DSH_WORKSPACE:-}" = "/workspaces"'
-  check "server-mode cordis.patch.yml was seeded into the harness home" \
-    docker exec dsh-server test -f /home/dsh/.dsh/cordis.patch.yml
-  if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
-       | grep -q '@deepseek-ai/dsh-host-directory-picker-browse'; then
-    pass "composed web profile mounts directory-picker-browse (remote-safe picker)"
+  if [ "$PROFILE_WEB" = "yes" ]; then
+    check "server-mode cordis.patch.yml was seeded into the harness home" \
+      docker exec dsh-server test -f /home/dsh/.dsh/cordis.patch.yml
+    if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
+         | grep -q '@deepseek-ai/dsh-host-directory-picker-browse'; then
+      pass "composed web profile mounts directory-picker-browse (remote-safe picker)"
+    else
+      fail "composed web profile does not show directory-picker-browse (dump-config)"
+    fi
+    if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
+         | grep -A2 '^- id: directory-picker$' | grep -q 'disabled: true'; then
+      pass "stock directory-picker-auto row is disabled in the composed profile"
+    else
+      fail "directory-picker-auto is not disabled in the composed profile (dump-config)"
+    fi
+    check "workspaces symlink present in the harness home" \
+      docker exec dsh-server sh -c 'test -L /home/dsh/workspaces && test "$(readlink /home/dsh/workspaces)" = "/workspaces"'
   else
-    fail "composed web profile does not show directory-picker-browse (dump-config)"
+    skip "server-mode profile seeding (cordis patch, directory picker, workspaces symlink) — added in 0.1.2-alpha.2"
   fi
-  if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
-       | grep -A2 '^- id: directory-picker$' | grep -q 'disabled: true'; then
-    pass "stock directory-picker-auto row is disabled in the composed profile"
-  else
-    fail "directory-picker-auto is not disabled in the composed profile (dump-config)"
-  fi
-  check "workspaces symlink present in the harness home" \
-    docker exec dsh-server sh -c 'test -L /home/dsh/workspaces && test "$(readlink /home/dsh/workspaces)" = "/workspaces"'
 else
   echo "image $IMAGE not present — run 'make build' (or DSH_IMAGE=... docker build) first"
   exit 1

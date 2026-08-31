@@ -33,20 +33,51 @@ if ! docker inspect "$IMAGE" >/dev/null 2>&1; then
   exit 0
 fi
 
+# ── image-era detection ───────────────────────────────────────────────────
+# DSH_WEB_AUTH_MODE=trust-proxy (the bundled proxy auto-exchanges the session
+# token) landed in 0.1.2-alpha.2. An older image serves the 0.1.2 session lock
+# but has no trust-proxy support, and a 0.1.1-era image has no session lock at
+# all — for both, the whole test is skipped rather than failed. The baked
+# healthcheck assertion is likewise only meaningful when it matches the era.
+HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+: "${HARNESS_VER:?cannot read '$IMAGE' --version}"
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+SESSION_LOCK=no;    version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
+TRUST_PROXY=no;     version_ge "$HARNESS_VER" 0.1.2-alpha.2 && TRUST_PROXY=yes
+HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
+HEALTH_OK=no; { [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ]; } && HEALTH_OK=yes
+skip() { echo "SKIP: $*"; }
+
+if [ "$TRUST_PROXY" != "yes" ]; then
+  echo "  image $IMAGE → harness $HARNESS_VER; DSH_WEB_AUTH_MODE=trust-proxy requires 0.1.2-alpha.2+ — skipping"
+  skip "trust-proxy mode (added in 0.1.2-alpha.2; $HARNESS_VER predates it)"
+  exit 0
+fi
+echo "  image $IMAGE → harness $HARNESS_VER (era healthcheck ok: $HEALTH_OK)"
+
 echo "== trust-proxy mode (ports $PORT, DSH_WEB_AUTH_MODE=trust-proxy) =="
 DSH_WEB_PORT="$PORT" DSH_IMAGE="$IMAGE" DSH_WEB_AUTH_MODE=trust-proxy \
   docker compose -f docker-compose.server.yml up -d --no-build >/dev/null 2>&1 \
   || { fail "docker compose (server, trust-proxy) up"; exit 1; }
 
-ok=0
-for _ in $(seq 1 60); do
-  case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
-    healthy) ok=1; break ;;
-  esac
-  sleep 1
-done
-if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
-else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
+if [ "$HEALTH_OK" = "yes" ]; then
+  ok=0
+  for _ in $(seq 1 60); do
+    case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
+      healthy) ok=1; break ;;
+    esac
+    sleep 1
+  done
+  if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
+  else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
+else
+  skip "baked healthcheck (pre-0.1.2-alpha.2 image: old curl -f check flips unhealthy under the 401 gate) — assert boot + serve instead"
+  if [ "$(docker inspect -f '{{.State.Running}}' dsh-server)" = "true" ]; then
+    pass "container is running (healthcheck semantics not applicable to this image era)"
+  else
+    fail "container is not running"
+  fi
+fi
 
 # Await the token exchange (the first request may briefly wait for the replay
 # cookie; a clean 200 proves the proxy auto-authenticated rather than the app

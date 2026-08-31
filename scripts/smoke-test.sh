@@ -14,6 +14,21 @@ PREFIX="dsh-smoke-$$"
 PORT=$(( ( RANDOM % 20000 ) + 20000 ))
 FAILED=0
 
+# ── image-era detection ───────────────────────────────────────────────────
+# The per-boot session lock (?token= ready line, 401 gate, host-independent
+# cookie) and the proxy's WebSocket relay to /api/remote.mux arrived with the
+# 0.1.2-alpha.1 harness. A 0.1.1-era image answers 200 on first boot with no
+# token and its proxy does not relay WS upgrades. The checks below branch on
+# this so each published version is verified against ITS contract — an older
+# image is not failed for correctly lacking a feature that was added later.
+HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+: "${HARNESS_VER:?cannot read '$IMAGE' --version}"
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+SESSION_LOCK=no
+version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
+skip() { echo "SKIP: $*"; }
+echo "  image $IMAGE → harness $HARNESS_VER (session lock: $SESSION_LOCK)"
+
 volumes=()
 containers=()
 cleanup() {
@@ -93,47 +108,66 @@ if wait_ready "$CID"; then pass "web server ready (URL line logged)"
 else fail "web server never printed its URL line"; docker logs "$CID" 2>&1 | tail -25; fi
 
 echo "== fixed in-container ports + browser-session auth =="
-# dsh web 0.1.2+ locks the GUI behind a per-run ?token= printed in the ready
-# line: it 401s until the browser exchanges the token for an authority-bound
-# cookie (303 + Set-Cookie). The proxy forwards that dance untouched and
-# rewrites the ready line to the public origin (localhost:<host port>), so the
-# log's "dsh web:" URL is what the user opens.
 TOK=$(session_token "$CID")
 logline=$(docker logs "$CID" 2>&1 | grep "dsh web: http" | head -1)
-if [ -n "$TOK" ] && printf '%s' "$logline" | grep -q "http://localhost:3080/?token="; then
-  pass "tokenized ready URL printed and rewritten to the public origin ($logline)"
+if [ "$SESSION_LOCK" = "yes" ]; then
+  # dsh web 0.1.2+ locks the GUI behind a per-run ?token= printed in the ready
+  # line: it 401s until the browser exchanges the token for an authority-bound
+  # cookie (303 + Set-Cookie). The proxy forwards that dance untouched and
+  # rewrites the ready line to the public origin (localhost:<host port>), so the
+  # log's "dsh web:" URL is what the user opens.
+  if [ -n "$TOK" ] && printf '%s' "$logline" | grep -q "http://localhost:3080/?token="; then
+    pass "tokenized ready URL printed and rewritten to the public origin ($logline)"
+  else
+    fail "ready URL missing or not rewritten to the public origin (got: $logline)"; TOK="missing"
+  fi
+
+  # The whole dance over the PUBLISHED port — the exact path a real user takes:
+  check "published URL without a token is refused (401 — session-locked)" \
+    test "$(http_code --max-time 8 "http://127.0.0.1:$PORT/")" = "401"
+  CJ=$(mktemp)
+  check "token exchange over the published port: /?token=… → 303 + cookie, then the GUI" \
+    curl -fsSL -c "$CJ" -b "$CJ" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT/?token=$TOK"
+  check "with the session cookie the GUI answers 200 via the published port" \
+    curl -fsS -o /dev/null -b "$CJ" --max-time 8 "http://127.0.0.1:$PORT/"
+
+  # LAN: the cookie is NOT bound to a host name or IP — the proxy always
+  # presents the fixed loopback authority to the app, so a cookie exchanged (or
+  # the token used) from any machine/Host validates. Assert it: exchange via a
+  # foreign Host, then reuse the exact cookie value over the container's own IP
+  # with another foreign Host (curl jar domain matching is bypassed by sending
+  # the cookie by hand, so this tests the APP, not curl).
+  IPCID=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID")
+  SESS=$(curl -s -D - -o /dev/null --max-time 10 -H "Host: 192.168.1.50:3080" \
+    "http://$IPCID:3080/?token=$TOK" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | head -1)
+  check "cookie is not host-bound: foreign Host/IP validates through the proxy (LAN)" \
+    bash -c 'test -n "$1" && curl -fsS -o /dev/null --max-time 8 \
+      -H "Host: laptop.lan:3080" -H "Cookie: $1" "http://$2:3080/"' _ "$SESS" "$IPCID"
+  rm -f "$CJ"
+
+  # The fixed in-container ports, verified from inside the container (the
+  # session lock 401s an unauthenticated probe — alive, not dead):
+  check "proxy chain up inside on 3080 (401 = app's auth gate, not a dead port)" \
+    test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:3080/)" = "401"
+  check "dsh web itself answers on 127.0.0.1:30800 (401 = auth gate)" \
+    test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:30800/)" = "401"
 else
-  fail "ready URL missing or not rewritten to the public origin (got: $logline)"; TOK="missing"
+  # 0.1.1-era: no session lock — the GUI is open on first boot and the ready
+  # line carries no token. Assert that contract instead of failing the image
+  # for predating the 0.1.2 feature.
+  if [ -n "$TOK" ] || printf '%s' "$logline" | grep -q 'token='; then
+    fail "unexpected session token on this image era (got: $logline)"
+  else
+    pass "ready URL printed without a session token (pre-0.1.2 — no session lock): $logline"
+  fi
+  check "published URL answers open on first boot (200, no session gate)" \
+    test "$(http_code --max-time 8 "http://127.0.0.1:$PORT/")" = "200"
+  skip "token exchange / cookie-dance checks (session lock added in 0.1.2; this image predates it)"
+  check "proxy chain up inside on 3080 (200 = app open, no session gate)" \
+    test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:3080/)" = "200"
+  check "dsh web itself answers on 127.0.0.1:30800 (200 = app open, no session gate)" \
+    test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:30800/)" = "200"
 fi
-
-# The whole dance over the PUBLISHED port — the exact path a real user takes:
-check "published URL without a token is refused (401 — session-locked)" \
-  test "$(http_code --max-time 8 "http://127.0.0.1:$PORT/")" = "401"
-CJ=$(mktemp)
-check "token exchange over the published port: /?token=… → 303 + cookie, then the GUI" \
-  curl -fsSL -c "$CJ" -b "$CJ" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT/?token=$TOK"
-check "with the session cookie the GUI answers 200 via the published port" \
-  curl -fsS -o /dev/null -b "$CJ" --max-time 8 "http://127.0.0.1:$PORT/"
-
-# LAN: the cookie is NOT bound to a host name or IP — the proxy always presents
-# the fixed loopback authority to the app, so a cookie exchanged (or the token
-# used) from any machine/Host validates. Assert it: exchange via a foreign Host,
-# then reuse the exact cookie value over the container's own IP with another
-# foreign Host (curl jar domain matching is bypassed by sending the cookie by
-# hand, so this tests the APP, not curl).
-IPCID=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID")
-SESS=$(curl -s -D - -o /dev/null --max-time 10 -H "Host: 192.168.1.50:3080" \
-  "http://$IPCID:3080/?token=$TOK" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | head -1)
-check "cookie is not host-bound: foreign Host/IP validates through the proxy (LAN)" \
-  bash -c 'test -n "$1" && curl -fsS -o /dev/null --max-time 8 \
-    -H "Host: laptop.lan:3080" -H "Cookie: $1" "http://$2:3080/"' _ "$SESS" "$IPCID"
-rm -f "$CJ"
-
-# The fixed in-container ports, verified from inside the container:
-check "proxy chain up inside on 3080 (401 = app's auth gate, not a dead port)" \
-  test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:3080/)" = "401"
-check "dsh web itself answers on 127.0.0.1:30800 (401 = auth gate)" \
-  test "$(docker exec "$CID" curl -s -o /dev/null -w '%{http_code}' --max-time 8 http://127.0.0.1:30800/)" = "401"
 
 echo "== runs as the unprivileged dsh user =="
 uid="$(docker exec "$CID" id -u)"
@@ -246,27 +280,33 @@ if [ "$any_px" != "000" ]; then
 else
   fail "proxy: did not serve the container interface (HTTP $any_px)"
 fi
-ws_code=000
-# The 0.1.2 web app's realtime channel is /api/remote.mux, and the upgrade
-# handshake needs the same session cookie as the HTTP API.
-CJPX=$(mktemp)
-TOKPX=$(session_token "$CIDPX")
-curl -fsSL -c "$CJPX" -b "$CJPX" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT_PX/?token=$TOKPX" >/dev/null 2>&1
-# A browser sends Origin + the session cookie on the upgrade; assert the proxy
-# relays it into a real 101 (not just any response). Go through the published
-# host port so the cookie jar (bound to 127.0.0.1) is actually sent.
-ws_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-  -b "$CJPX" -H "Origin: http://localhost:$PORT_PX" \
-  -H "Connection: Upgrade" -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
-  "http://127.0.0.1:$PORT_PX/api/remote.mux")
-rm -f "$CJPX"
-case "$ws_code" in
-  101) pass "proxy: WebSocket upgrade to /api/remote.mux relayed (101 Switching Protocols)" ;;
-  000) fail "proxy: WS upgrade got no response at all (000)" ;;
-  502) fail "proxy: WS upgrade hit a proxy error (502)" ;;
-  *)   fail "proxy: WS upgrade did not switch protocols (app answered $ws_code)" ;;
-esac
+if [ "$SESSION_LOCK" = "yes" ]; then
+  ws_code=000
+  # The 0.1.2 web app's realtime channel is /api/remote.mux, and the upgrade
+  # handshake needs the same session cookie as the HTTP API.
+  CJPX=$(mktemp)
+  TOKPX=$(session_token "$CIDPX")
+  curl -fsSL -c "$CJPX" -b "$CJPX" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT_PX/?token=$TOKPX" >/dev/null 2>&1
+  # A browser sends Origin + the session cookie on the upgrade; assert the proxy
+  # relays it into a real 101 (not just any response). Go through the published
+  # host port so the cookie jar (bound to 127.0.0.1) is actually sent.
+  ws_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    -b "$CJPX" -H "Origin: http://localhost:$PORT_PX" \
+    -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
+    "http://127.0.0.1:$PORT_PX/api/remote.mux")
+  rm -f "$CJPX"
+  case "$ws_code" in
+    101) pass "proxy: WebSocket upgrade to /api/remote.mux relayed (101 Switching Protocols)" ;;
+    000) fail "proxy: WS upgrade got no response at all (000)" ;;
+    502) fail "proxy: WS upgrade hit a proxy error (502)" ;;
+    *)   fail "proxy: WS upgrade did not switch protocols (app answered $ws_code)" ;;
+  esac
+else
+  # Pre-0.1.2 the bundled proxy does not relay WS upgrades to /api/remote.mux
+  # (there is no session lock / token dance to go with it yet) — not a defect.
+  skip "proxy WebSocket relay to /api/remote.mux (added in 0.1.2; this image predates it)"
+fi
 
 echo
 if [ "$FAILED" -eq 0 ]; then

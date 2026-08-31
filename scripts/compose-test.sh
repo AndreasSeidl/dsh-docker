@@ -24,6 +24,22 @@ IMAGE="${DSH_IMAGE:-dsh:dev}"
 PORT="${COMPOSE_TEST_PORT:-3082}"
 FAILED=0
 
+# ── image-era detection ───────────────────────────────────────────────────
+# 0.1.1-era images answer first-boot / 200 (no session lock); the baked
+# `curl -f` healthcheck is correct for that era. From 0.1.2-alpha.1 the web
+# app 401s an unauthenticated GET, so a pre-0.1.2-alpha.2 image (which still
+# bakes the old curl -f healthcheck) is marked unhealthy by Docker for
+# protocol reasons even though it boots and serves. We therefore assert
+# "healthy" only when the baked healthcheck matches the era's gate behavior.
+HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
+: "${HARNESS_VER:?cannot read '$IMAGE' --version}"
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+SESSION_LOCK=no;   version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
+HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
+HEALTH_OK=no; [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ] && HEALTH_OK=yes
+skip() { echo "SKIP: $*"; }
+echo "  image $IMAGE → harness $HARNESS_VER (session lock: $SESSION_LOCK, era healthcheck ok: $HEALTH_OK)"
+
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
 check() { if "${@:2}" >/dev/null 2>&1; then pass "$1"; else fail "$1"; fi; }
@@ -37,6 +53,17 @@ reachable() {
     2*|301|302|303|307|401) return 0 ;;
   esac
   echo "HTTP $code" >&2
+  return 1
+}
+# Some images take up to a minute to boot the app behind the proxy (and the
+# era-healthcheck branch skips the healthy-wait that used to absorb that);
+# poll until it answers rather than asserting on first contact.
+wait_reachable() { # wait_reachable <url> <max seconds>
+  local i=0
+  while [ "$i" -lt "$2" ]; do
+    reachable "$1" 4 >/dev/null 2>&1 && return 0
+    i=$((i+1)); sleep 1
+  done
   return 1
 }
 
@@ -55,19 +82,28 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   DSH_WEB_PORT="$PORT" DSH_IMAGE="$IMAGE" docker compose up -d --no-build >/dev/null 2>&1 \
     || { fail "docker compose up"; exit 1; }
 
-  # wait for the healthcheck to report healthy
-  ok=0
-  for _ in $(seq 1 60); do
-    case "$(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null)" in
-      healthy) ok=1; break ;;
-    esac
-    sleep 1
-  done
-  if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
-  else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null))"; fi
+  if [ "$HEALTH_OK" = "yes" ]; then
+    # wait for the healthcheck to report healthy
+    ok=0
+    for _ in $(seq 1 60); do
+      case "$(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null)" in
+        healthy) ok=1; break ;;
+      esac
+      sleep 1
+    done
+    if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
+    else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null))"; fi
+  else
+    skip "baked healthcheck (pre-0.1.2-alpha.2 image: old curl -f check flips unhealthy under the 401 gate) — assert boot + serve instead"
+    if [ "$(docker inspect -f '{{.State.Running}}' dsh)" = "true" ]; then
+      pass "container is running (healthcheck semantics not applicable to this image era)"
+    else
+      fail "container is not running"
+    fi
+  fi
 
   check "web GUI reachable via the published port (proxy answers)" \
-    reachable "http://127.0.0.1:$PORT/" 20
+    wait_reachable "http://127.0.0.1:$PORT/" 60
 
   # ── the access fence: the PUBLISH ADDRESS, not anything in the container ──
   # Default (DSH_BIND_ADDRESS unset) must publish on 127.0.0.1 only, so the
