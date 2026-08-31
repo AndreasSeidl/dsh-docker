@@ -1,0 +1,148 @@
+# CONTROLLED EXPERIMENT: is it safe to remove the per-arch owner images that
+# back a merged GHCR multi-arch tag, and by which mechanism?
+#
+# Background. The publish pipeline builds linux/amd64 + linux/arm64 natively,
+# pushes each under a throwaway tag, then `docker buildx imagetools create`s
+# them into the published multi-arch tag (`<version>` + `latest`). The per-arch
+# versions are the "owners" of the platform content the merged index references.
+# 0.1.2-alpha.2 became un-pullable right after this workflow DELETED those
+# owner VERSIONS via the GitHub REST API in the same run: `docker pull` then
+# failed with "manifest … not found". By contrast 0.1.2-alpha.1 / 0.1.1-rc.2
+# (whose owners were UNTAGGED but never version-deleted) still pull fine.
+#
+# This workflow answers, on real GHCR with the repo's GITHUB_TOKEN:
+#   TEST A — untag the owners (`crane untag`, version + content remain): does
+#            the merged tag stay pullable? (Expected: YES.)
+#   TEST B — version-delete the owners (REST `DELETE /versions/{id}`): does the
+#            merged tag stay pullable? (Expected: NO — reproduces alpha.2.)
+# plus a final snapshot of the package's versions (tagged vs untagged).
+#
+# Everything lives under disposable `exp1-*` / `exp2-*` tags on the dsh-docker
+# package and is fully cleaned up at the end (retiring the test rows wholesale
+# is always safe: nothing real references them).
+name: verify-prune-safety
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  experiment:
+    name: untag vs version-delete on real GHCR
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      # tiny alpine image: arm64 via QEMU on this one runner is fine.
+      - uses: docker/setup-qemu-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Install crane (for untag)
+        run: |
+          curl -fsSL -m 60 \
+            "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
+            -o /tmp/crane.tgz
+          tar xzf /tmp/crane.tgz crane
+          install -m 0755 crane /usr/local/bin/crane
+          crane version
+
+      - name: Run the experiment
+        env:
+          PKG: ${{ github.repository }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMG="ghcr.io/${PKG@L}"
+          CONTAINER="${PKG#*/}"          # repo name = GHCR package name (lowercase ok for API)
+          RID="${{ github.run_id }}"
+          mkdir -p ctx && printf 'FROM alpine:3.20\n' > ctx/Dockerfile
+
+          build_owners() {            # $1 = prefix (exp1/exp2)
+            docker buildx build --platform linux/amd64 --push -t "$IMG:$1-owner-amd64-$RID" ctx
+            docker buildx build --platform linux/arm64 --push -t "$IMG:$1-owner-arm64-$RID" ctx
+            docker buildx imagetools create -t "$IMG:$1-$RID" \
+              "$IMG:$1-owner-amd64-$RID" "$IMG:$1-owner-arm64-$RID"
+          }
+          reachable() { docker manifest inspect --verbose "$1" >/dev/null 2>&1; }
+
+          # ---- TEST A: untag owners (keep versions/content) ----
+          echo "===== TEST A: untag owners ====="
+          build_owners exp1
+          echo "A baseline:"; reachable "$IMG:exp1-$RID" && echo "  merged tag resolves (baseline OK)"
+          crane untag "$IMG:exp1-owner-amd64-$RID"
+          crane untag "$IMG:exp1-owner-arm64-$RID"
+          echo "A exp1-* tags still listed:"; \
+            curl -fsS -m 20 "https://ghcr.io/token?scope=repository:${PKG@L}:pull" \
+              | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])' > "$RID.tok"
+            curl -fsS -m 20 -H "Authorization: Bearer $(cat $RID.tok)" \
+              "https://ghcr.io/v2/${PKG@L}/tags/list?n=500" \
+              | python3 -c 'import sys,json;print([t for t in json.load(sys.stdin)["tags"] if t.startswith("exp1")])'
+          if reachable "$IMG:exp1-$RID"; then
+            echo "  TEST A PASS: merged tag STILL resolves after untagging owners"
+          else
+            echo "  TEST A FAIL: untagging broke the merged tag"; exit 1
+          fi
+
+          # ---- TEST B (control): version-delete owners ----
+          echo "===== TEST B: version-delete owners ====="
+          build_owners exp2
+          curl -sS -m 20 -H "Authorization: Bearer $TOKEN" \
+            "https://api.github.com/user/packages/container/$CONTAINER/versions?per_page=100" -o "$RID.json"
+          python3 - "$RID.json" "$RID" > "$RID.vids" <<'PY'
+          import json, sys
+          vs = json.load(open(sys.argv[1])); rid = sys.argv[2]
+          for v in vs:
+              tags = v.get("metadata", {}).get("container", {}).get("tags") or []
+              hit = [t for t in tags if t.endswith("-" + rid)]
+              if any(t.startswith(("exp2-owner-amd64-", "exp2-owner-arm64-")) for t in hit):
+                  print(v["id"], ",".join(hit))
+          PY
+          while read -r VID TAGS; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 -X DELETE \
+                      -H "Authorization: Bearer $TOKEN" \
+                      "https://api.github.com/user/packages/container/$CONTAINER/versions/$VID")"
+            echo "  B deleted version $VID ($TAGS) -> HTTP $code"
+          done < "$RID.vids"
+          if reachable "$IMG:exp2-$RID"; then
+            echo "  TEST B UNEXPECTED-PASS: merged tag STILL resolves after version-deleting owners"
+          else
+            echo "  TEST B CONFIRMED (expected): version-delete broke the merged tag (alpha.2 repro)"
+          fi
+
+          # ---- snapshot + cleanup ----
+          echo "== package versions snapshot =="
+          curl -sS -m 20 -H "Authorization: Bearer $TOKEN" \
+            "https://api.github.com/user/packages/container/$CONTAINER/versions?per_page=100" \
+            | python3 -c '
+          import json, sys
+          for v in json.load(sys.stdin):
+              tags = v.get("metadata", {}).get("container", {}).get("tags") or []
+              print((v.get("created_at") or "?")[:19], "|", ", ".join(tags) if tags else "(untagged)", "|", v.get("id"))
+          ' | head -40
+          echo "== cleaning up disposable test rows =="
+          python3 - "$RID.json" "$RID" > "$RID.all" <<'PY'
+          import json, sys
+          vs = json.load(open(sys.argv[1])); rid = sys.argv[2]
+          for v in vs:
+              tags = v.get("metadata", {}).get("container", {}).get("tags") or []
+              if any(t.startswith(("exp1", "exp2")) for t in tags):
+                  print(v["id"], ",".join(tags))
+          PY
+          while read -r VID TAGS; do
+            [ -n "$VID" ] || continue
+            code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 -X DELETE \
+                      -H "Authorization: Bearer $TOKEN" \
+                      "https://api.github.com/user/packages/container/$CONTAINER/versions/$VID")"
+            echo "  removed test row $VID ($TAGS) -> HTTP $code"
+          done < "$RID.all"
+          rm -f "$RID.json" "$RID.vids" "$RID.all" "$RID.tok"
+          echo "DONE"

@@ -61,26 +61,17 @@ workflow (`uses: ./.github/workflows/docker-publish.yml with: version: …`),
 which carries the same GITHUB_TOKEN-backed GHCR push permissions it always
 had.
 
-`linux/amd64` and `linux/arm64` are both built and pushed, **natively**: a two-
-job matrix (`ubuntu-latest` for amd64, the `ubuntu-24.04-arm` hosted ARM runner
-for arm64) builds each platform in parallel — no QEMU — and a `merge` job joins
-them into one multi-arch manifest with `docker buildx imagetools create`
-(published under `<version>`, with `latest` aliasing the newest release).
-Earlier versions cross-built arm64 with QEMU, which is ~1 h cold and made the
-arm64 leg look stuck; native building removed that. Tags in the recipe repo and
+`linux/amd64` and `linux/arm64` are both built and pushed **natively**: a two-job
+matrix (`ubuntu-latest` for amd64, the `ubuntu-24.04-arm` hosted ARM runner for
+arm64) builds each platform in parallel — no QEMU — under a throwaway hash-like
+tag `sha256-<md5(run-id-arch)[0:12]>` (an obvious build artifact, not a
+release), and a `merge` job joins them into the published multi-arch index
+(`<version>` + `latest`) with `docker buildx imagetools create`. The merge job
+then **verifies** the published tags actually resolve (both platform manifests
+reachable, and the amd64 leg runs) and **untags** the per-arch owner tags with
+`crane`, keeping the versions — so the tag overview shows only `<version>` +
+`latest` while the published tag can never break. Tags in the recipe repo and
 harness versions map 1:1 (`v`-prefix optional).
-
-The per-arch builds push under **throwaway** `dsh-int-<arch>-<run-id>` tags
-purely as a handle for the merge step; after the multi-arch index is created
-the merge job deletes those versions via the GitHub REST API, so GHCR keeps
-only the versioned **multi-arch** rows (`<version>` + `latest`) — not
-`<version>-amd64`/`<version>-arm64` rows. (The platform *images* themselves
-unavoidably still appear as untagged digest rows: a multi-arch index must
-reference them in the same package, and GHCR lists every manifest. That is true
-of every multi-arch container on GHCR/Docker Hub.) If the merge job's
-in-workflow cleanup hits a permission wall, it logs a warning and the leftover
-`dsh-int-*` versions can be deleted with the `prune-ghcr` workflow (or manually
-in the GHCR UI).
 
 CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
 `mode=max` and a per-arch `scope` so the builder stages stay warm between runs.
@@ -106,8 +97,27 @@ occasional cold start when the 7-day TTL evicts the cache first is fine.
 > builds set `provenance: false`/`sbom: false`, so future images have clean
 > two-platform indexes; the `unknown/unknown` entries only linger on the older
 > tags. And don't pin by one of their digests — a digest like
-> `sha256:380f67a3…` is the attestation stub, not a runnable image (see the
-> merge job below for the real per-arch digests).
+> `sha256:380f67a3…` is the attestation stub, not a runnable image.
+
+### Why the owners are untagged, never version-deleted
+
+A draft of this pipeline deleted the throwaway per-arch versions right after
+merging. GHCR's version deletion is **not reference-aware**: deleting a
+per-arch "owner" version removes the platform manifest the freshly created
+multi-arch index still points at, so `docker pull` of the published tag fails
+with `manifest … not found`. That is exactly what happened to `0.1.2-alpha.2` /
+`:latest` (published on the first run where that cleanup actually executed);
+`0.1.1-rc.2` and `0.1.2-alpha.1` survived only because their owners had been
+**untagged, not deleted** — which is the safe end-state this pipeline now
+produces deliberately. Untagging drops the readable `sha256-*` tag while the
+version and all its content remain: the tag overview stays clean and the merged
+index stays resolvable (re-verified at the end of the merge job). The owners
+show as "Untagged" rows in the GHCR Versions view and stay searchable by
+digest. Because nothing may ever version-delete them, the per-release owner
+rows accumulate permanently — the price of native multi-arch on GHCR. The
+[`verify-prune-safety.yml`](.github/workflows/verify-prune-safety.yml)
+workflow is a reproducible experiment backing these claims (TEST A: untaging
+is safe; TEST B: version-deleting reproduces the breakage).
 
 ## Making a release
 

@@ -8,7 +8,7 @@
 #   1. every hour (17 min past, to spread load) list ALL upstream release tags
 #      `refs/tags/dsh-v*`;
 #   2. list the version tags already published on GHCR (real version rows only
-#      — `latest` and the throwaway `dsh-int-*` per-arch build tags are not
+#      — `latest` and the throwaway `sha256-*` per-arch build tags are not
 #      versions);
 #   3. skip the tick while a docker-publish run is already in progress (so the
 #      newest release is only ever built once);
@@ -79,13 +79,13 @@ jobs:
               print("false")
           else:
               tags = json.load(open("tags.json")).get("tags", [])
-              # Real versions only. `latest`, `nightly`, the dsh-int-* throwaway
-              # per-arch build tags, and any <ver>-amd64/-arm64 row are NOT
-              # versions.
+              # Real versions only. `latest`, `nightly`, and the throwaway
+              # per-arch build tags (`sha256-*` today, `dsh-int-*`/`nightly`
+              # from older pipelines) are NOT versions.
               garbage = {"latest", "nightly"}
               versions = {t for t in tags
                           if t not in garbage
-                          and not t.startswith("dsh-int-")
+                          and not t.startswith(("sha256-", "dsh-int-"))
                           and not t.endswith(("-amd64", "-arm64"))}
               try:
                   inflight = any(r.get("name") == "docker-publish"

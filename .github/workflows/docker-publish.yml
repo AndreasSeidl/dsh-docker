@@ -18,12 +18,27 @@
 #
 # NATIVE multi-arch: two matrix jobs build linux/amd64 (ubuntu-latest) and
 # linux/arm64 (ubuntu-24.04-arm hosted ARM runner) natively — no QEMU, so the
-# arm64 leg is as fast as amd64 (QEMU cross-building once cost ~1 h of emulated
-# pnpm/tsc on a cold run). Each platform pushes a throwaway per-arch tag
-# (dsh-int-<arch>-<run-id>); the `merge` job joins them into the final multi-arch
-# manifest with `docker buildx imagetools create`, then deletes the throwaway
-# versions via the GitHub REST API so GHCR keeps only the versioned multi-arch
-# rows (no `<version>-amd64`/`<version>-arm64` rows).
+# arm64 leg is as fast as amd64. Each platform is pushed under a throwaway
+# hash-like tag `sha256-<md5(run-id-arch)[0:12]>` (an obvious build artifact,
+# NOT a release), which the `merge` job recomputes deterministically — no
+# matrix output plumbing. The merge job then:
+#   1. joins them with `docker buildx imagetools create` into the multi-arch
+#      index published as `<version>` + `latest`;
+#   2. VERIFIES the published tags actually resolve (both platform manifests
+#      reachable) and that the image runs (`docker run` the amd64 leg);
+#   3. UNTAGS the per-arch owner tags with `crane` — the owner versions (and
+#      all their content) are KEPT, only the readable `sha256-*` tags go, so
+#      the tag overview shows just `<version>` + `latest` and the published
+#      tag can never break. After untagging it re-verifies the tag once more.
+#
+# Why the owners are untagged and NEVER version-deleted: GHCR's version
+# deletion is not reference-aware — deleting a per-arch "owner" version removes
+# the platform manifest the merged index points at, leaving the published tag
+# un-pullable (`manifest not found`, seen on 0.1.2-alpha.2 / `:latest`). The
+# owners of 0.1.2-alpha.1 / 0.1.1-rc.2 survive precisely because they were
+# untagged — not deleted. Untagging lands in exactly that safe state. (The
+# verify-prune-safety.yml workflow is a reproducible experiment for these
+# claims; the owners show as "Untagged" rows in the GHCR Versions view.)
 name: docker-publish
 
 on:
@@ -145,14 +160,15 @@ jobs:
           # derive it via bash's @L lowercase expansion.
           IMG="ghcr.io/${GITHUB_REPOSITORY@L}"
           echo "image=$IMG" | tee -a "$GITHUB_OUTPUT"
-          echo "target=${{ steps.version.outputs.version }}" | tee -a "$GITHUB_OUTPUT"
-          # Throwaway per-arch tag: the merge job joins these into the final
-          # multi-arch manifest and then deletes them, so GHCR keeps only the
-          # versioned multi-arch rows. They are NOT part of the multi-arch
-          # index (the index references the platform images directly), so they
-          # are safe to remove. github.run_id keeps them unique per run; bare
-          # refs would push to docker.io/library, so always fully qualified.
-          echo "perarch_tags=$IMG:dsh-int-${{ matrix.arch }}-${{ github.run_id }}" | tee -a "$GITHUB_OUTPUT"
+          # Throwaway per-arch tag. Its hash-like name (md5 of run-id + arch,
+          # first 12 hex chars) makes it read as a build artifact, never a
+          # release — so nobody mistakes `sha256-*` rows for published versions.
+          # The merge job recomputes the exact same names, so it needs no
+          # matrix-output plumbing. These versions are the "owners" of the
+          # platform content the merged multi-arch index references: they must
+          # outlive the merge (they are pruned only much later, see the header).
+          H="$(printf '%s-%s' "${{ github.run_id }}" "${{ matrix.arch }}" | md5sum | cut -c1-12)"
+          echo "throwaway=$IMG:sha256-$H" | tee -a "$GITHUB_OUTPUT"
 
       - name: Build and push (linux/${{ matrix.arch }})
         uses: docker/build-push-action@v6
@@ -160,7 +176,7 @@ jobs:
           context: .docker-context
           platforms: linux/${{ matrix.arch }}
           push: true
-          tags: ${{ steps.tags.outputs.perarch_tags }}
+          tags: ${{ steps.tags.outputs.throwaway }}
           # Warm-cache plumbing. type=gha is SELF-MANAGING: GitHub caps it per
           # repo (~10 GB for public repos) and evicts LRU / 7-day-stale entries,
           # so it cannot grow without bound. Per-arch scope keeps amd64/arm64
@@ -187,10 +203,10 @@ jobs:
             DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}
 
   merge:
-    name: merge multi-arch manifest
+    name: merge multi-arch manifest (verify + delayed prune)
     needs: build
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -198,6 +214,16 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Install crane (untag tool)
+        run: |
+          curl -fsSL -m 60 \
+            "https://github.com/google/go-containerregistry/releases/latest/download/go-containerregistry_Linux_x86_64.tar.gz" \
+            -o /tmp/crane.tgz
+          tar xzf /tmp/crane.tgz crane
+          install -m 0755 crane /usr/local/bin/crane
 
       - name: Compute image and target
         id: meta
@@ -208,27 +234,26 @@ jobs:
           # upstream fallback for an empty manual dispatch), never "nightly".
           echo "target=${{ needs.build.outputs.version }}" >> "$GITHUB_OUTPUT"
 
-      - name: Create combined multi-arch manifest
+      - name: Create multi-arch manifest, verify and untag owners
         env:
           IMG: ${{ steps.meta.outputs.image }}
           TARGET: ${{ steps.meta.outputs.target }}
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # Merge the two throwaway per-arch tags into one multi-arch index
-          # (`:<version>` + `:latest`), then delete the throwaway
-          # `dsh-int-<arch>-<run>` versions via the GitHub REST API so the
-          # package keeps only the versioned multi-arch rows. The multi-arch
-          # index references the platform IMAGES directly — not these
-          # single-platform index versions — so removing them never breaks the
-          # published tag.
           set -u
+
+          # --- 1) merge ---
+          # Re-discover the two throwaway per-arch images by recomputing the
+          # deterministic names the build matrix used (md5 of run-id + arch).
+          RID="${{ github.run_id }}"
           ARCH_TAGS=""
           for a in amd64 arm64; do
-            INT="$IMG:dsh-int-$a-${{ github.run_id }}"
-            if docker buildx imagetools inspect "$INT" >/dev/null 2>&1; then
-              ARCH_TAGS="$ARCH_TAGS $INT"
+            H="$(printf '%s-%s' "$RID" "$a" | md5sum | cut -c1-12)"
+            REF="$IMG:sha256-$H"
+            if docker buildx imagetools inspect "$REF" >/dev/null 2>&1; then
+              ARCH_TAGS="$ARCH_TAGS $REF"
+              echo "found $REF"
             else
-              echo "warning: missing $INT — skipping"
+              echo "warning: missing $REF — skipping"
             fi
           done
           [ -n "$ARCH_TAGS" ] || { echo "no per-arch images to merge" >&2; exit 1; }
@@ -239,48 +264,46 @@ jobs:
             || { echo "merge failed" >&2; exit 1; }
           echo "published $IMG:$TARGET + $IMG:latest"
 
-          echo
-          echo "== cleanup: deleting throwaway dsh-int-* per-arch versions =="
-          # GHCR has no registry-level DELETE (`405 UNSUPPORTED`), so use the
-          # GitHub REST API with the run's GITHUB_TOKEN. Best-effort: a cleanup
-          # failure must not fail the publish (the merged multi-arch tag already
-          # exists), it just leaves a dsh-int-* row to delete manually (or via
-          # the prune-ghcr workflow).
-          #
-          # The version-id lookup runs python from a SCRIPT FILE: piping curl
-          # into `python3 - <<'PY'` would let the heredoc claim stdin, so the
-          # API JSON never reaches python (the old cleanup silently no-opped for
-          # exactly that reason). python3's stdin here carries the curl JSON.
-          cat > /tmp/lookup.py <<'PY'
-          import json, sys
-          tag = sys.argv[1]
-          try:
-              vs = json.load(sys.stdin)
-          except Exception:
-              vs = []
-          for v in vs:
-              if tag in (v.get("metadata", {}).get("container", {}).get("tags") or []):
-                  print(v["id"])
-                  break
-          PY
-          pruned=0
-          for a in amd64 arm64; do
-            INT="$IMG:dsh-int-$a-${{ github.run_id }}"
-            # The versions API reports metadata.container.tags as BARE tag
-            # names (no ghcr.io/<owner>/<image>: prefix), so match the plain
-            # tag — passing $INT (full ref) would never match anything.
-            TAG="dsh-int-$a-${{ github.run_id }}"
-            VID="$(curl -sS --max-time 20 -H 'Authorization: Bearer '"$TOKEN" \
-                     "https://api.github.com/user/packages/container/${GITHUB_REPOSITORY#*/}/versions?per_page=100" \
-                   | python3 /tmp/lookup.py "$TAG" || true)"
-            if [ -n "$VID" ]; then
-              HTTP="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -X DELETE \
-                        -H 'Authorization: Bearer '"$TOKEN" \
-                        "https://api.github.com/user/packages/container/${GITHUB_REPOSITORY#*/}/versions/$VID" || true)"
-              echo "  deleted $INT (id=$VID) -> HTTP $HTTP"
-              pruned=$((pruned + 1))
-            else
-              echo "  note: $INT not found in the versions list (already deleted?)"
-            fi
+          # --- 2) verify BEFORE touching the owner rows ---
+          # Resolve every platform manifest the fresh index references. This is
+          # exactly the check that would have caught the 0.1.2-alpha.2 failure
+          # (index present, platform content gone). `--verbose` forces docker
+          # to fetch each child manifest, not just the index.
+          echo "== verifying published tags resolve to real content =="
+          for REF in "$IMG:$TARGET" "$IMG:latest"; do
+            docker manifest inspect --verbose "$REF" >/dev/null \
+              || { echo "FATAL: $REF references unreachable platform content" >&2; exit 1; }
+            echo "  $REF: both platform manifests reachable"
           done
-          echo "cleanup: pruned $pruned throwaway version(s)"
+          # Full smoke on the host architecture — the same path `docker compose
+          # up` takes. (arm64 can't *execute* on an amd64 runner, but its
+          # manifest was just verified reachable above.)
+          docker run --rm --platform linux/amd64 "$IMG:$TARGET" --version >/dev/null \
+            || { echo "FATAL: published image does not run" >&2; exit 1; }
+          echo "  verified: $IMG:$TARGET pulls and runs (amd64)"
+
+          # --- 3) untag the per-arch owner tags (KEEP the versions/content) ---
+          # The per-arch versions are the long-term "owners" of the platform
+          # content the merged index references. They must NEVER be
+          # version-deleted: GHCR's version deletion is not reference-aware and
+          # removes the platform manifests the index points at, breaking the
+          # published tag — that is exactly the 0.1.2-alpha.2 incident (see
+          # verify-prune-safety.yml / CONTRIBUTING). Untagging removes only the
+          # readable `sha256-*` tag: the version row and ALL its content remain
+          # (digit-searchable), the tag overview stays clean (only `<version>`
+          # and `latest` are tagged), and the published tag can never break.
+          # Best-effort: a failed untag just leaves a sha256-* tag lying around
+          # (harmless — it reads as a build artifact, never a release).
+          echo "== untagging owner tags (keep versions) =="
+          for a in amd64 arm64; do
+            H="$(printf '%s-%s' "$RID" "$a" | md5sum | cut -c1-12)"
+            REF="$IMG:sha256-$H"
+            echo "  untag $REF"
+            crane untag "$REF" || echo "  warning: could not untag $REF (leaving the tag)"
+          done
+
+          # Final safety net: the merged tag must STILL resolve after untagging.
+          if ! docker manifest inspect --verbose "$IMG:$TARGET" >/dev/null; then
+            echo "FATAL: published tag broke after untagging owners" >&2; exit 1
+          fi
+          echo "verified after untag: $IMG:$TARGET + $IMG:latest resolve cleanly"
