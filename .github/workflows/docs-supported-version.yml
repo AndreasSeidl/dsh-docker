@@ -1,10 +1,13 @@
 name: docs-supported-version
 
 # Keep the README's stated support floor glued to .supported-version (the
-# single source of truth). Bumping the floor edits .supported-version, then
-# `make docs-sync` restates it in the README; this runs the sync script in
-# --check mode on every relevant push so a drifted README fails CI instead of
-# silently understating/stale-ing what we support.
+# single source of truth). On push this SELF-HEALS: it regenerates the floor
+# sentence from .supported-version and commits the result back with a
+# `[skip ci]` trailer, so bumping the floor is a one-file change — edit
+# .supported-version and push; the README updates itself. On pull requests it
+# behaves as a plain check (auto-commits run on main only, so PRs just fail
+# loudly if they drift). The bot commit is guarded by a real diff: a re-run on
+# an already-synced tree is a no-op and never pushes, so the flow terminates.
 on:
   push:
     branches: [main]
@@ -21,7 +24,26 @@ on:
       - 'scripts/sync-supported-version.sh'
 
 jobs:
+  self-heal:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # commit the synced README back to main
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate the README floor from .supported-version
+        run: ./scripts/sync-supported-version.sh
+      - name: Commit the synced README when it drifted
+        run: |
+          git diff --quiet README.md && { echo "README already in sync — nothing to commit"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: sync supported-version floor into README [skip ci]"
+          git push
+
   check:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

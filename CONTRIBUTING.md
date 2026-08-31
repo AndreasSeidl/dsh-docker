@@ -66,11 +66,12 @@ so high that the current release itself goes unsupported. When a new upstream
 version ships and passes, move the floor up to it; tags below it simply stop
 being tested (they stay on GHCR as immutable artifacts).
 
-Bumping the floor is a two-file change: edit `.supported-version`, then run
-`make docs-sync` (or `./scripts/sync-supported-version.sh`) to restate the new
-floor in the README — the README's floor sentence is generated from
-`.supported-version`, and the `docs-supported-version` CI job runs it in
-`--check` mode on every push, so the two can never drift.
+Bumping the floor is a one-file change: edit `.supported-version` and push.
+The README floor sentence is generated from it — the `docs-supported-version`
+workflow re-states it and commits the result back on every push to main, so the
+two can never drift and nothing needs editing by hand. (To re-state it locally,
+`make docs-sync` or `./scripts/sync-supported-version.sh`; pull requests run the
+same sync in `--check` mode.)
 
 Since the suites assert the full contract unconditionally, anything that differs
 per version belongs at the floor, not in the tests: by the time you would write

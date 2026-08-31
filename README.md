@@ -153,7 +153,9 @@ drives the test suites and the publish pipeline (see
   remain on GHCR as an immutable artifact, but nothing is guaranteed about it.
 
 The floor stated below is generated from [`.supported-version`](.supported-version)
-(`make docs-sync`, enforced by CI) — edit the file, not this paragraph.
+(edit the file, not this paragraph — the `docs-supported-version` workflow
+re-states it automatically on every push; `make docs-sync` does the same
+locally).
 
 Right now the floor is **`0.1.2-alpha.2`** — the oldest version that still
 passes the complete test suite. The current release is **`0.1.2-alpha.3`**
