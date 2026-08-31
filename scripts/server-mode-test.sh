@@ -21,33 +21,22 @@ IMAGE="${DSH_IMAGE:-dsh:dev}"
 PORT="${SERVER_MODE_TEST_PORT:-3083}"
 FAILED=0
 
-# ── image-era detection ───────────────────────────────────────────────────
-# Two era-gates:
-#   * server-mode profile seeding (cordis.patch.yml, the in-app directory
-#     picker, and the /home/dsh/workspaces symlink) landed in 0.1.2-alpha.2;
-#   * the baked healthcheck only matches the app in 0.1.1 (no 401 gate) or
-#     from 0.1.2-alpha.2 (healthcheck learned to accept the gate's 401).
+# ── supported-version floor ───────────────────────────────────────────────
+# The suite asserts the FULL server-mode contract (0.0.0.0 publish, volumes,
+# profile seeding, Docker healthcheck that knows about the session lock's 401)
+# and is only ever run against images at or above the minimum supported version
+# (.supported-version = the oldest version that still passes every check).
+# Older versions are unsupported: the tests do not run against them.
 HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
 : "${HARNESS_VER:?cannot read '$IMAGE' --version}"
 version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' ./.supported-version 2>/dev/null | tr -d '[:space:]' || true)"
 : "${MIN_SUPPORTED:?missing ./.supported-version — run the tests from the repo root}"
-SUPPORTED=no; version_ge "$HARNESS_VER" "$MIN_SUPPORTED" && SUPPORTED=yes
-SESSION_LOCK=no;    version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
-PROFILE_WEB=no;     version_ge "$HARNESS_VER" 0.1.2-alpha.2 && PROFILE_WEB=yes
-HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
-HEALTH_OK=no; [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ] && HEALTH_OK=yes
-# Legacy-era accommodations below the supported floor are SKIPped; at or above
-# the floor a skip firing is a bug (a supported image must pass every strict
-# check, and the era gates therefore must never trigger for it).
-skip() {
-  if [ "$SUPPORTED" = "yes" ]; then
-    fail "era skip fired on a supported image (floor $MIN_SUPPORTED): $*"
-  else
-    echo "SKIP: $*"
-  fi
-}
-echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED → $SUPPORTED; profile web: $PROFILE_WEB, era healthcheck ok: $HEALTH_OK)"
+if ! version_ge "$HARNESS_VER" "$MIN_SUPPORTED"; then
+  echo "  unsupported version: $IMAGE → harness $HARNESS_VER < floor $MIN_SUPPORTED — not supported, skipping"
+  exit 0
+fi
+echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED)"
 
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
@@ -92,24 +81,15 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
     docker compose -f docker-compose.server.yml up -d --no-build >/dev/null 2>&1 \
     || { fail "docker compose (server) up"; exit 1; }
 
-  if [ "$HEALTH_OK" = "yes" ]; then
-    ok=0
-    for _ in $(seq 1 60); do
-      case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
-        healthy) ok=1; break ;;
-      esac
-      sleep 1
-    done
-    if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
-    else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
-  else
-    skip "baked healthcheck (pre-0.1.2-alpha.2 image: old curl -f check flips unhealthy under the 401 gate) — assert boot + serve instead"
-    if [ "$(docker inspect -f '{{.State.Running}}' dsh-server)" = "true" ]; then
-      pass "container is running (healthcheck semantics not applicable to this image era)"
-    else
-      fail "container is not running"
-    fi
-  fi
+  ok=0
+  for _ in $(seq 1 60); do
+    case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
+      healthy) ok=1; break ;;
+    esac
+    sleep 1
+  done
+  if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
+  else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
 
   check "web GUI reachable on localhost ($PORT, proxy answers)" \
     wait_reachable "http://127.0.0.1:$PORT/" 60
@@ -149,26 +129,22 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   # ── server-mode entrypoint seeding ────────────────────────────────────────
   check "entrypoint defaulted DSH_WORKSPACE to /workspaces" \
     docker exec dsh-server sh -c 'test "${DSH_WORKSPACE:-}" = "/workspaces"'
-  if [ "$PROFILE_WEB" = "yes" ]; then
-    check "server-mode cordis.patch.yml was seeded into the harness home" \
-      docker exec dsh-server test -f /home/dsh/.dsh/cordis.patch.yml
-    if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
-         | grep -q '@deepseek-ai/dsh-host-directory-picker-browse'; then
-      pass "composed web profile mounts directory-picker-browse (remote-safe picker)"
-    else
-      fail "composed web profile does not show directory-picker-browse (dump-config)"
-    fi
-    if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
-         | grep -A2 '^- id: directory-picker$' | grep -q 'disabled: true'; then
-      pass "stock directory-picker-auto row is disabled in the composed profile"
-    else
-      fail "directory-picker-auto is not disabled in the composed profile (dump-config)"
-    fi
-    check "workspaces symlink present in the harness home" \
-      docker exec dsh-server sh -c 'test -L /home/dsh/workspaces && test "$(readlink /home/dsh/workspaces)" = "/workspaces"'
+  check "server-mode cordis.patch.yml was seeded into the harness home" \
+    docker exec dsh-server test -f /home/dsh/.dsh/cordis.patch.yml
+  if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
+       | grep -q '@deepseek-ai/dsh-host-directory-picker-browse'; then
+    pass "composed web profile mounts directory-picker-browse (remote-safe picker)"
   else
-    skip "server-mode profile seeding (cordis patch, directory picker, workspaces symlink) — added in 0.1.2-alpha.2"
+    fail "composed web profile does not show directory-picker-browse (dump-config)"
   fi
+  if docker exec dsh-server dsh --profile web --dump-config 2>/dev/null \
+       | grep -A2 '^- id: directory-picker$' | grep -q 'disabled: true'; then
+    pass "stock directory-picker-auto row is disabled in the composed profile"
+  else
+    fail "directory-picker-auto is not disabled in the composed profile (dump-config)"
+  fi
+  check "workspaces symlink present in the harness home" \
+    docker exec dsh-server sh -c 'test -L /home/dsh/workspaces && test "$(readlink /home/dsh/workspaces)" = "/workspaces"'
 else
   echo "image $IMAGE not present — run 'make build' (or DSH_IMAGE=... docker build) first"
   exit 1

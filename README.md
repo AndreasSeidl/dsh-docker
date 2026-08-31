@@ -139,18 +139,20 @@ lock, so prefer leaving it unless you know what is in front.
 ## Supported versions
 
 The minimum upstream harness version this repo guarantees support for lives in
-[`.supported-version`](.supported-version) (the "supported version floor"). It
+[`.supported-version`](.supported-version) (the "supported version floor") —
+defined as *the oldest version that still passes the complete test suite*. It
 drives the test suites and the publish pipeline (see
 [CONTRIBUTING.md](CONTRIBUTING.md)):
 
-- an image **at or above the floor must pass every current check** — no era
-  compromises;
-- an image **below the floor is legacy**: it is still verified against *its own
-  era's* contract while it stays published, but no guarantee is made and no new
-  compatibility work goes back to it.
+- an image **at or above the floor must pass every current check** — the
+  suites assert the full contract, with no version-conditional fallbacks;
+- an image **below the floor is unsupported**: the test suites do **not run
+  against it** at all, and the publish pipeline refuses to publish it. It may
+  remain on GHCR as an immutable artifact, but nothing is guaranteed about it.
 
 Right now the floor is **`0.1.2-alpha.2`** (the current release, alias of
-`latest`). The two older published tags predate it and are legacy:
+`latest`). The two older published tags predate it and are unsupported (kept on
+GHCR, no longer tested):
 
 | Version | Session lock / WS relay | Trust-proxy | Server-mode profile | Docker health |
 |---|---|---|---|---|
@@ -162,8 +164,7 @@ The one operational caveat: `0.1.2-alpha.1` **always reports `unhealthy` under
 Docker even though it boots and serves correctly** — its baked-in healthcheck
 was written before the 0.1.2+ session lock made an unauthenticated probe answer
 `401` (which `curl -f` treats as failure). Orchestrators that restart on
-"unhealthy" would therefore bounce it; prefer `0.1.2-alpha.2` or later. The
-test suites account for this per era instead of failing the image for it.
+"unhealthy" would therefore bounce it; prefer `0.1.2-alpha.2` or later.
 
 ---
 

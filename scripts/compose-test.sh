@@ -24,33 +24,22 @@ IMAGE="${DSH_IMAGE:-dsh:dev}"
 PORT="${COMPOSE_TEST_PORT:-3082}"
 FAILED=0
 
-# ── image-era detection ───────────────────────────────────────────────────
-# 0.1.1-era images answer first-boot / 200 (no session lock); the baked
-# `curl -f` healthcheck is correct for that era. From 0.1.2-alpha.1 the web
-# app 401s an unauthenticated GET, so a pre-0.1.2-alpha.2 image (which still
-# bakes the old curl -f healthcheck) is marked unhealthy by Docker for
-# protocol reasons even though it boots and serves. We therefore assert
-# "healthy" only when the baked healthcheck matches the era's gate behavior.
+# ── supported-version floor ───────────────────────────────────────────────
+# The suite asserts the FULL contract (hardened compose boot + Docker
+# healthcheck, which knows about the session lock's 401) and is only ever run
+# against images at or above the minimum supported version (.supported-version
+# = the oldest version that still passes every check). Older versions are
+# unsupported: the tests do not run against them (a "skip", not a failure).
 HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
 : "${HARNESS_VER:?cannot read '$IMAGE' --version}"
 version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' ./.supported-version 2>/dev/null | tr -d '[:space:]' || true)"
 : "${MIN_SUPPORTED:?missing ./.supported-version — run the tests from the repo root}"
-SUPPORTED=no; version_ge "$HARNESS_VER" "$MIN_SUPPORTED" && SUPPORTED=yes
-SESSION_LOCK=no;   version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
-HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
-HEALTH_OK=no; [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ] && HEALTH_OK=yes
-# Legacy-era accommodations below the supported floor are SKIPped; at or above
-# the floor a skip firing is a bug (a supported image must pass every strict
-# check, and the era gates therefore must never trigger for it).
-skip() {
-  if [ "$SUPPORTED" = "yes" ]; then
-    fail "era skip fired on a supported image (floor $MIN_SUPPORTED): $*"
-  else
-    echo "SKIP: $*"
-  fi
-}
-echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED → $SUPPORTED; session lock: $SESSION_LOCK, era healthcheck ok: $HEALTH_OK)"
+if ! version_ge "$HARNESS_VER" "$MIN_SUPPORTED"; then
+  echo "  unsupported version: $IMAGE → harness $HARNESS_VER < floor $MIN_SUPPORTED — not supported, skipping"
+  exit 0
+fi
+echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED)"
 
 pass() { echo "PASS: $*"; }
 fail() { echo "FAIL: $*"; FAILED=1; }
@@ -94,25 +83,16 @@ if docker inspect "$IMAGE" >/dev/null 2>&1; then
   DSH_WEB_PORT="$PORT" DSH_IMAGE="$IMAGE" docker compose up -d --no-build >/dev/null 2>&1 \
     || { fail "docker compose up"; exit 1; }
 
-  if [ "$HEALTH_OK" = "yes" ]; then
-    # wait for the healthcheck to report healthy
-    ok=0
-    for _ in $(seq 1 60); do
-      case "$(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null)" in
-        healthy) ok=1; break ;;
-      esac
-      sleep 1
-    done
-    if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
-    else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null))"; fi
-  else
-    skip "baked healthcheck (pre-0.1.2-alpha.2 image: old curl -f check flips unhealthy under the 401 gate) — assert boot + serve instead"
-    if [ "$(docker inspect -f '{{.State.Running}}' dsh)" = "true" ]; then
-      pass "container is running (healthcheck semantics not applicable to this image era)"
-    else
-      fail "container is not running"
-    fi
-  fi
+  # wait for the healthcheck to report healthy
+  ok=0
+  for _ in $(seq 1 60); do
+    case "$(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null)" in
+      healthy) ok=1; break ;;
+    esac
+    sleep 1
+  done
+  if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
+  else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh 2>/dev/null))"; fi
 
   check "web GUI reachable via the published port (proxy answers)" \
     wait_reachable "http://127.0.0.1:$PORT/" 60

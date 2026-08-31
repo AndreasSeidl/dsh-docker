@@ -33,67 +33,37 @@ if ! docker inspect "$IMAGE" >/dev/null 2>&1; then
   exit 0
 fi
 
-# ── image-era detection ───────────────────────────────────────────────────
-# DSH_WEB_AUTH_MODE=trust-proxy (the bundled proxy auto-exchanges the session
-# token) landed in 0.1.2-alpha.2. An older image serves the 0.1.2 session lock
-# but has no trust-proxy support, and a 0.1.1-era image has no session lock at
-# all — for both, the whole test is skipped rather than failed. The baked
-# healthcheck assertion is likewise only meaningful when it matches the era.
+# ── supported-version floor ───────────────────────────────────────────────
+# The suite asserts the FULL trust-proxy contract (proxy auto-exchanges the
+# session token, clean ready line, no 401s) and is only ever run against images
+# at or above the minimum supported version (.supported-version = the oldest
+# version that still passes every check). Older versions are unsupported: the
+# tests do not run against them.
 HARNESS_VER="$(docker run --rm --entrypoint dsh "$IMAGE" --version 2>/dev/null | head -n1 | tr -d '[:space:]' || true)"
 : "${HARNESS_VER:?cannot read '$IMAGE' --version}"
 version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' ./.supported-version 2>/dev/null | tr -d '[:space:]' || true)"
 : "${MIN_SUPPORTED:?missing ./.supported-version — run the tests from the repo root}"
-SUPPORTED=no; version_ge "$HARNESS_VER" "$MIN_SUPPORTED" && SUPPORTED=yes
-SESSION_LOCK=no;    version_ge "$HARNESS_VER" 0.1.2-alpha.1 && SESSION_LOCK=yes
-TRUST_PROXY=no;     version_ge "$HARNESS_VER" 0.1.2-alpha.2 && TRUST_PROXY=yes
-HEALTHCHECK_NEW=no; version_ge "$HARNESS_VER" 0.1.2-alpha.2 && HEALTHCHECK_NEW=yes
-HEALTH_OK=no; { [ "$SESSION_LOCK" = "no" ] || [ "$HEALTHCHECK_NEW" = "yes" ]; } && HEALTH_OK=yes
-# Below the supported floor trust-proxy is SKIPped (feature added later, no
-# longer guaranteed); at or above the floor it MUST exist — if the era gate
-# fires here the version→feature mapping is stale, so fail rather than skip.
-skip() {
-  if [ "$SUPPORTED" = "yes" ]; then
-    fail "era skip fired on a supported image (floor $MIN_SUPPORTED): $*"
-  else
-    echo "SKIP: $*"
-  fi
-}
-
-if [ "$TRUST_PROXY" != "yes" ]; then
-  if [ "$SUPPORTED" = "yes" ]; then
-    fail "trust-proxy absent on a supported image ($HARNESS_VER ≥ floor $MIN_SUPPORTED) — the feature threshold is stale"
-    exit 1
-  fi
-  echo "  image $IMAGE → harness $HARNESS_VER; DSH_WEB_AUTH_MODE=trust-proxy requires 0.1.2-alpha.2+ — skipping"
-  skip "trust-proxy mode (added in 0.1.2-alpha.2; $HARNESS_VER predates it)"
+if ! version_ge "$HARNESS_VER" "$MIN_SUPPORTED"; then
+  echo "  unsupported version: $IMAGE → harness $HARNESS_VER < floor $MIN_SUPPORTED — not supported, skipping"
   exit 0
 fi
-echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED → $SUPPORTED; era healthcheck ok: $HEALTH_OK)"
+echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED)"
 
 echo "== trust-proxy mode (ports $PORT, DSH_WEB_AUTH_MODE=trust-proxy) =="
 DSH_WEB_PORT="$PORT" DSH_IMAGE="$IMAGE" DSH_WEB_AUTH_MODE=trust-proxy \
   docker compose -f docker-compose.server.yml up -d --no-build >/dev/null 2>&1 \
   || { fail "docker compose (server, trust-proxy) up"; exit 1; }
 
-if [ "$HEALTH_OK" = "yes" ]; then
-  ok=0
-  for _ in $(seq 1 60); do
-    case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
-      healthy) ok=1; break ;;
-    esac
-    sleep 1
-  done
-  if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
-  else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
-else
-  skip "baked healthcheck (pre-0.1.2-alpha.2 image: old curl -f check flips unhealthy under the 401 gate) — assert boot + serve instead"
-  if [ "$(docker inspect -f '{{.State.Running}}' dsh-server)" = "true" ]; then
-    pass "container is running (healthcheck semantics not applicable to this image era)"
-  else
-    fail "container is not running"
-  fi
-fi
+ok=0
+for _ in $(seq 1 60); do
+  case "$(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null)" in
+    healthy) ok=1; break ;;
+  esac
+  sleep 1
+done
+if [ "$ok" -eq 1 ]; then pass "container reached healthy (healthcheck)"
+else fail "container never became healthy ($(docker inspect -f '{{.State.Health.Status}}' dsh-server 2>/dev/null))"; fi
 
 # Await the token exchange (the first request may briefly wait for the replay
 # cookie; a clean 200 proves the proxy auto-authenticated rather than the app

@@ -35,38 +35,41 @@ release branch juggling.
 
 `.supported-version` in the repo root (see [.supported-version](.supported-version))
 is the single source of truth for the oldest upstream harness version this repo
-guarantees support for — the minimum supported version. It is read by:
+guarantees support for — the **minimum supported version**. It is defined as
+*the oldest version that still passes the complete test suite* (see below), and
+it is read by:
 
 - the **test suites** (`scripts/{smoke,compose,server-mode,trust-proxy}-test.sh`):
-  a version at or above the floor must pass **every** check with **zero**
-  era-SKIPs (a SKIP firing on a supported image fails the run); anything below
-  the floor runs the era-gated substitution (SKIP lines) and is treated as
-  legacy — no longer guaranteed;
+  each reads the image's `dsh --version`, compares it to the floor, and **does
+  not run at all against versions below it** (an unsupported version prints a
+  "skipping" note and exits 0). The suites are written against the current
+  contract, so anything at or above the floor must pass it fully — there are
+  **no version-conditional fallbacks** to maintain;
 - the **publish workflow** (`docker-publish.yml`): it refuses to build/publish
   an upstream version below the floor, and asserts the published image reports
   a version at or above it.
 
 **Always make the trade-off when fixing:** when you change behavior or add a
-feature, decide explicitly whether old versions should keep passing. If
-back-porting to a version below the floor isn't worth it — bump the floor. Do
-**not** accumulate permanent backwards-compatibility gates for versions nobody
-still runs; the floor is the statement "we no longer maintain that". Bumping
-the floor never deletes anything from GHCR (owners stay as untagged digests
-forever — see below); it only redefines which versions the tests and CI hold
-to the full contract.
+feature, decide explicitly whether it can be back-ported to the current floor.
+If it isn't worth it — bump the floor. Do **not** reintroduce backwards
+compatibility into the suites (no SKIP branches for old versions): if an old
+version stops passing the current contract, that is exactly what "below the
+floor" means — its tests no longer run. Bumping the floor never deletes
+anything from GHCR (owners stay as untagged digests forever — see below); it
+only redefines which versions the tests and CI hold to the full contract.
 
-**Set the floor to something reasonable:** prefer the current release, or the
-oldest version you are honestly willing to keep passing every check — never so
-low that era-gates multiply for releases you don't care about, and never so
-high that the current release itself goes unsupported. When a new version
-passes everything and ships, consider bumping the floor to it and dropping the
-era-gates for everything below (the suites keep SKIP-logging legacy versions
-until then).
+**Set the floor to something reasonable:** the current release is the natural
+default — the oldest version you are honestly willing to keep passing every
+check. Never set it below a version that no longer passes the suite (there is
+nothing to gain: the tests won't run on it and CI won't publish it), and never
+so high that the current release itself goes unsupported. When a new upstream
+version ships and passes, move the floor up to it; tags below it simply stop
+being tested (they stay on GHCR as immutable artifacts).
 
-The feature→version thresholds that back the era-gates live in the same
-scripts (session lock + WS relay: 0.1.2-alpha.1; trust-proxy + server-profile
-seeding + session-lock-compatible healthcheck: 0.1.2-alpha.2). When you raise
-the floor, adjust or remove any threshold that is now at or below it.
+Since the suites assert the full contract unconditionally, anything that differs
+per version belongs at the floor, not in the tests: by the time you would write
+a version check inside a suite, you should be considering whether the floor
+needs to move instead.
 
 ## CI & publishing (`docker-publish` workflow)
 
