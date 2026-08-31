@@ -68,10 +68,8 @@ tag `sha256-<md5(run-id-arch)[0:12]>` (an obvious build artifact, not a
 release), and a `merge` job joins them into the published multi-arch index
 (`<version>` + `latest`) with `docker buildx imagetools create`. The merge job
 then **verifies** the published tags actually resolve (both platform manifests
-reachable, and the amd64 leg runs) and **untags** the per-arch owner tags with
-`regctl tag rm`, keeping the versions — so the tag overview shows only
-`<version>` + `latest` while the published tag can never break. Tags in the
-recipe repo and harness versions map 1:1 (`v`-prefix optional).
+reachable) and that the amd64 leg runs. Tags in the recipe repo and harness
+versions map 1:1 (`v`-prefix optional).
 
 CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
 `mode=max` and a per-arch `scope` so the builder stages stay warm between runs.
@@ -99,7 +97,7 @@ occasional cold start when the 7-day TTL evicts the cache first is fine.
 > tags. And don't pin by one of their digests — a digest like
 > `sha256:380f67a3…` is the attestation stub, not a runnable image.
 
-### Why the owners are untagged, never version-deleted
+### Why the owners keep their tags and are never deleted
 
 A draft of this pipeline deleted the throwaway per-arch versions right after
 merging. GHCR's version deletion is **not reference-aware**: deleting a
@@ -107,17 +105,19 @@ per-arch "owner" version removes the platform manifest the freshly created
 multi-arch index still points at, so `docker pull` of the published tag fails
 with `manifest … not found`. That is exactly what happened to `0.1.2-alpha.2` /
 `:latest` (published on the first run where that cleanup actually executed);
-`0.1.1-rc.2` and `0.1.2-alpha.1` survived only because their owners had been
-**untagged, not deleted** — which is the safe end-state this pipeline now
-produces deliberately. Untagging drops the readable `sha256-*` tag while the
-version and all its content remain: the tag overview stays clean and the merged
-index stays resolvable (re-verified at the end of the merge job). The owners
-show as "Untagged" rows in the GHCR Versions view and stay searchable by
-digest. Because nothing may ever version-delete them, the per-release owner
-rows accumulate permanently — the price of native multi-arch on GHCR. The
-[`verify-prune-safety.yml`](.github/workflows/verify-prune-safety.yml)
-workflow is a reproducible experiment backing these claims (TEST A: untaging
-is safe; TEST B: version-deleting reproduces the breakage).
+`0.1.1-rc.2` and `0.1.2-alpha.1` survived only because their owners were never
+deleted. Two controlled experiments on real GHCR then established the boundary:
+**GHCR exposes no tag-removal API at all** — the registry `DELETE` endpoint
+answers `405 UNSUPPORTED` (so neither the OCI tag-delete API nor `regctl tag
+rm`'s dummy-manifest fallback can work), and the only REST primitive deletes a
+whole *version*, which is precisely the destructive operation above. There is
+therefore no supported way to hide or remove owner rows while keeping their
+content. Consequently this pipeline leaves the `sha256-*` owners permanently
+tagged — hash-named so they read as build artifacts and are never mistaken for
+releases, and excluded from the poller's release detection — while the merge
+job's verify step guards that the published tag itself is real. The per-release
+owner rows accumulate permanently; that is the price of native multi-arch on
+GHCR.
 
 ## Making a release
 
