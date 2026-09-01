@@ -274,9 +274,29 @@ ARG DSH_INCLUDE_BUILD_TOOLS=1
 # node-pty-style addons); verified by scripts/plugin-test.sh.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git tini \
+      bash ca-certificates curl git openssh-client tini \
       $(if [ "${DSH_INCLUDE_BUILD_TOOLS}" = "1" ]; then echo gcc g++ make python3 pkg-config; fi) \
  && rm -rf /var/lib/apt/lists/*
+
+# SSH for git-over-ssh. The harness is headless and $HOME/.ssh is not
+# persisted (the container rootfs is read-only), so point the client at the
+# volume-backed $DSH_HOME/.ssh that the entrypoint seeds: identity files and
+# known_hosts live there with everything else the harness owns — no extra
+# volume. `accept-new` lets the first clone of a new host (e.g. github.com)
+# succeed instead of failing at the host-key prompt an unattended agent cannot
+# answer; the key is then stored in the PERSISTED known_hosts and `ssh -T
+# git@github.com` stays green. Drop an unencrypted deploy key (e.g.
+# id_ed25519, chmod 600) into $DSH_HOME/.ssh and `git clone
+# git@github.com:...` works with no further config.
+RUN mkdir -p /etc/ssh/ssh_config.d \
+ && printf '%s\n' \
+      '# dsh-container: persist SSH identity + host keys under $DSH_HOME/.ssh' \
+      'IdentityFile /home/dsh/.dsh/.ssh/id_rsa' \
+      'IdentityFile /home/dsh/.dsh/.ssh/id_ecdsa' \
+      'IdentityFile /home/dsh/.dsh/.ssh/id_ed25519' \
+      'UserKnownHostsFile /home/dsh/.dsh/.ssh/known_hosts' \
+      'StrictHostKeyChecking accept-new' \
+      > /etc/ssh/ssh_config.d/99-dsh-container.conf
 
 # pnpm stays available so `dsh plugin --profile <name> add <pkg>` works inside
 # the container (the profile lives on the volume). Installed via npm rather

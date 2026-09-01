@@ -286,6 +286,14 @@ if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
   # pnpm's content-addressed store lives on the volume so plugin installs stay
   # fast and persistent; make sure it exists and is writable.
   mkdir -p "$DSH_HOME/.pnpm-store"
+  # SSH credentials persist on the SAME volume as everything else the harness
+  # owns: the baked /etc/ssh/ssh_config.d/99-dsh-container.conf points the
+  # client at identity files and known_hosts here, and this seeds the
+  # directory (idempotent, 0700 — never touches what is already there). Drop
+  # an unencrypted deploy key (e.g. id_ed25519, chmod 600) into
+  # "$DSH_HOME/.ssh/" and `git clone git@github.com:...` works from the agent.
+  mkdir -p "$DSH_HOME/.ssh"
+  chmod 700 "$DSH_HOME/.ssh"
 fi
 
 # The invoking directory is the harness's default workspace root (the same
