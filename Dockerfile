@@ -347,6 +347,39 @@ RUN node /usr/local/lib/dsh-container/inject-randomuuid-polyfill.mjs /app/apps/w
 # a harness bump is surfaced at build time, never silently skipped.
 RUN node /usr/local/lib/dsh-container/enable-remote-settings.mjs /app/packages
 
+# Landlock sandbox launcher — ship the prebuilt static binary DSH resolves at
+# /app/native/landlock-run/packages/<platform>/bin/landlock-run. The platform
+# packages reach the image as source only (their bin/ is a build artifact), so
+# an unfixed image ships NO usable sandbox backend (no bwrap, no launcher) and
+# the harness fails closed with SANDBOX_UNAVAILABLE. This pulls the matching
+# published platform package (versioned by the workspace package's own version)
+# and drops its binary at exactly the path @deepseek-ai/node-addon-landlock-run
+# resolves via require.resolve. Landlock needs no capabilities and no seccomp
+# relaxation, so the cap_drop ALL / no-new-privileges hardening is preserved
+# under the default seccomp profile. Disable with DSH_INCLUDE_LANDLOCK_LAUNCHER=0.
+ARG TARGETARCH
+ARG DSH_INCLUDE_LANDLOCK_LAUNCHER=1
+RUN if [ "${DSH_INCLUDE_LANDLOCK_LAUNCHER}" = "1" ]; then \
+      case "${TARGETARCH:-amd64}" in \
+        amd64) LLR_PKG=@deepseek-ai/node-addon-landlock-run-linux-x64; LLR_DIR=linux-x64 ;; \
+        arm64) LLR_PKG=@deepseek-ai/node-addon-landlock-run-linux-arm64; LLR_DIR=linux-arm64 ;; \
+        *) LLR_PKG= ;; \
+      esac; \
+      if [ -n "$LLR_PKG" ]; then \
+        LLR_VERSION="$(node -e "console.log(require('/app/native/landlock-run/packages/${LLR_DIR}/package.json').version)")"; \
+        echo "landlock launcher: ${LLR_PKG}@${LLR_VERSION} -> ${LLR_DIR}/bin"; \
+        npm install --no-save --no-package-lock --prefix /tmp/llr "${LLR_PKG}@${LLR_VERSION}" \
+          || { echo "FATAL: could not fetch ${LLR_PKG}@${LLR_VERSION} — sandbox would be unavailable; update the pin or set DSH_INCLUDE_LANDLOCK_LAUNCHER=0" 1>&2; exit 1; }; \
+        mkdir -p "/app/native/landlock-run/packages/${LLR_DIR}/bin"; \
+        cp "/tmp/llr/node_modules/${LLR_PKG}/bin/landlock-run" \
+           "/app/native/landlock-run/packages/${LLR_DIR}/bin/landlock-run"; \
+        chown -R dsh:dsh "/app/native/landlock-run/packages/${LLR_DIR}/bin"; \
+        rm -rf /tmp/llr; \
+      else \
+        echo "WARNING: no landlock launcher for target arch ${TARGETARCH:-amd64}; the harness sandbox will be unavailable on this image" 1>&2; \
+      fi; \
+    fi
+
 # `dsh` -> the built CLI entry, plus make the entrypoint executable.
 RUN printf '%s\n' '#!/bin/sh' 'exec /usr/local/bin/node /app/apps/cli/lib/bin.js "$@"' > /usr/local/bin/dsh \
  && chmod +x /usr/local/bin/dsh /usr/local/bin/docker-entrypoint.sh
