@@ -122,12 +122,18 @@ jobs:
         id: upstream
         run: |
           # Prefer the newest released upstream tag over the default branch so
-          # the guard exercises a real release snapshot when one exists.
-          REF="$(git ls-remote --refs --tags \
-                   https://github.com/deepseek-ai/deepseek-harness.git \
-                   'refs/tags/dsh-v*' \
-                   | sed 's#.*refs/tags/dsh-v##; s/\^{}//' | sort -V | tail -1 || true)"
-          [ -n "$REF" ] || REF="master"
+          # the guard exercises a real release snapshot when one exists. Upstream
+          # tags releases as `dsh-v<version>` — the ref handed to checkout below
+          # MUST keep that prefix (a bare version is not a ref in that repo).
+          VERSION="$(git ls-remote --refs --tags \
+                       https://github.com/deepseek-ai/deepseek-harness.git \
+                       'refs/tags/dsh-v*' \
+                       | sed 's#.*refs/tags/dsh-v##; s/\^{}//' | sort -V | tail -1 || true)"
+          if [ -n "$VERSION" ]; then
+            REF="dsh-v${VERSION}"
+          else
+            REF="master"
+          fi
           echo "ref=$REF" | tee -a "$GITHUB_OUTPUT"
 
       - name: Checkout harness source
