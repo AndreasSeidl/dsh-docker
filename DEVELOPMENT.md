@@ -98,7 +98,7 @@ This is what `scripts/compose-test.sh` does (see TESTING.md).
 | `TAG` | `dev` | tag for build/publish |
 | `INCLUDE_BUILD_TOOLS` | on (`1`) | bake the C/native toolchain (`gcc g++ make python3 pkg-config`) into the runtime so `dsh plugin add` can compile native addons; set `0` for a leaner image (plugin installs that need a compiler then fail) |
 | `INCLUDE_AGENT_CLIS` | off (`0`) | bundle the codex/claude-agent CLI binaries (~560 MB) so `subagent_codex` / `subagent_claude_code` resolve |
-| `CACHE_REF` | *(empty)* | registry cache ref to warm `docker build` from (e.g. the GHCR `:buildcache` the CI exports) |
+| `CACHE_REF` | *(empty)* | registry cache ref to warm `docker build` from (the per-version `:buildcache-<version>-<arch>` tags the CI exports, e.g. `ghcr.io/you/dsh-docker:buildcache-0.1.2-alpha.2-amd64`) |
 | `PORT` | `3080` | host port for `make run` |
 | `KEEP_STORAGE` | `5G` | BuildKit cache ceiling kept by `make cache-prune` |
 
@@ -217,6 +217,18 @@ member links, so the Dockerfile keeps the (correct) offline reinstall; the
 cross-filesystem cache mount costs ~10 MB of compressed image size (+3%) versus no
 mount. CI publishes/consumes `type=gha` + registry build caches, so Actions builds
 start warm after the first run.
+
+**On CI the two stores are bounded differently.** The publish workflow caches
+two ways: a `type=gha` cache (`mode=min` — final-image layers only, so the
+~10 GB GitHub cap never thrashes the shared base back out of cache) and a
+per-version registry buildcache (`type=registry, mode=max` under
+`ghcr.io/<owner>/dsh-docker:buildcache-<version>-<arch>`) that keeps the
+install/compile stages so an already-built version replays instead of
+recompiling. Registry buildcache has **no automatic eviction**, so the
+workflow's `prune-buildcache` job deletes any buildcache version whose version
+is below the supported floor on every publish — the cache is bounded by the set
+of supported versions, and the job is deliberately non-fatal (a missing
+`delete:packages` token never blocks a publish).
 
 ## Cache hygiene (keeping the build cache bounded)
 

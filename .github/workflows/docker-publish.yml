@@ -254,15 +254,31 @@ jobs:
           # untagged, content-addressed version (searchable by digest, never
           # shown among tagged releases). The merge job joins the raw digests.
           outputs: type=image,name=${{ steps.image.outputs.image }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
-          # Warm-cache plumbing. type=gha is SELF-MANAGING: GitHub caps it per
-          # repo (~10 GB for public repos) and evicts LRU / 7-day-stale entries,
-          # so it cannot grow without bound. Per-arch scope keeps amd64/arm64
-          # caches independent. mode=max stores intermediate layers so the
-          # builder stages (~90% of the compile cost) are reused. No registry
-          # buildcache: it is additive with no size eviction (the unbounded
-          # analogue of a 100 GB local build cache) — see README "Cache hygiene".
-          cache-from: type=gha,scope=dsh-${{ matrix.arch }}
-          cache-to: type=gha,mode=max,scope=dsh-${{ matrix.arch }}
+          # Warm-cache plumbing, over two stores with different retention
+          # semantics (see DEVELOPMENT.md "Cache hygiene"):
+          #  * gha cache (type=gha) is SELF-MANAGING — GitHub caps it per repo
+          #    (~10 GB), evicting LRU / 7-day-stale entries, so it can never
+          #    grow without bound. mode=min stores ONLY the final-image layers:
+          #    the shared base (debian+node+apt) plus each version's /app layer
+          #    — exactly the cross-version, cross-run reusable subset. mode=max
+          #    also persisted every builder intermediate (a full pnpm tree +
+          #    compile state per version) and 5 versions × 2 arches of that
+          #    exceeded the cap and LRU-evicted the shared base back out, so
+          #    `all` runs kept starting ~cold; min fits and the base survives.
+          #  * registry buildcache (type=registry) per (version × arch) tag on
+          #    GHCR keeps the builder/compile layers (mode=max) so a republish
+          #    of an already-built version — e.g. the container-layer-fix `all`
+          #    run, where the harness source is unchanged — REPLAYS the
+          #    install+compile instead of re-running it. It has NO automatic
+          #    eviction; the prune-buildcache job bounds it to versions at/above
+          #    the supported floor (anything below the floor is dead weight).
+          # Per-arch gha scopes keep amd64/arm64 caches independent.
+          cache-from: |
+            type=gha,scope=dsh-${{ matrix.arch }}
+            type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
+          cache-to: |
+            type=gha,mode=min,scope=dsh-${{ matrix.arch }}
+            type=registry,mode=max,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
           # Disable BuildKit's default SLSA provenance/SBOM attestations: they
           # are pushed as extra index entries with no os/arch and show up as
           # "unknown/unknown" platforms in UIs and `manifest inspect` (and
@@ -480,3 +496,91 @@ jobs:
           echo "published: $VERSIONS"
           echo "  + $IMG:latest -> $LATEST"
           echo "  (owners kept as untagged digests)"
+
+  # Keep the registry buildcache bounded. Unlike the gha cache, GHCR buildcache
+  # storage has NO automatic eviction — each build pushes ~2-3 GB of builder
+  # layers per (version × arch) and it only ever grows. This job deletes every
+  # buildcache GHCR "version" whose tags are exclusively `buildcache-*` for a
+  # version BELOW the supported floor: once a version drops off the floor it can
+  # never be built again, so its builder cache is pure dead weight.
+  # It deliberately never touches the published <version>/latest tags and never
+  # touches UNTAGGED versions — the per-arch owner digests are untagged and
+  # deleting one would break a published tag (see the file header). Consequence:
+  # a superseded buildcache digest whose tag moved is left as an untagged
+  # remnant; that only happens on a republish of the same (version × arch)
+  # (rare), so it stays bounded in practice.
+  # Runs independently (in parallel with build/test): it only operates below the
+  # floor, which the current run never rebuilds. continue-on-error keeps it
+  # non-fatal — if the token lacks delete:packages the publish is never blocked;
+  # the fix is a PAT with delete:packages in a DSH_PAT secret.
+  prune-buildcache:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Delete buildcache versions below the supported floor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          OWNER="${GITHUB_REPOSITORY%/*}"
+          PKG="${GITHUB_REPOSITORY#*/}"
+          MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' .supported-version 2>/dev/null | tr -d '[:space:]' || true)"
+          [ -n "$MIN_SUPPORTED" ] || { echo "skip: no .supported-version floor"; exit 0; }
+          version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+
+          # GHCR container packages are owner-scoped: under the org when the
+          # repo is org-owned, under the authenticated user otherwise.
+          if curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+                 "https://api.github.com/orgs/$OWNER" >/dev/null 2>&1; then
+            SCOPE="/orgs/$OWNER"
+          else
+            SCOPE="/user"
+          fi
+          BASE="https://api.github.com${SCOPE}/packages/container/$PKG"
+
+          DELETED=0
+          PAGE=1
+          while :; do
+            DATA="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
+                       "$BASE/versions?per_page=100&page=$PAGE" || true)"
+            [ -n "$DATA" ] || { echo "note: package $PKG not listable (skip prune)"; break; }
+            [ "$(printf '%s' "$DATA" | jq 'length')" != "0" ] || break
+            for id in $(printf '%s' "$DATA" | jq -r '.[].id'); do
+              TAGS="$(printf '%s' "$DATA" | jq -r --argjson id "$id" \
+                '.[] | select(.id==$id) | ((.metadata.container.tags // []) | join(" "))')"
+              # Only versions whose tags are ALL buildcache-*: never published
+              # <version>/latest tags, never untagged (owner) digests.
+              ALL_BUILDCACHE=1
+              for t in $TAGS; do
+                case "$t" in buildcache-*) ;; *) ALL_BUILDCACHE=0 ;; esac
+              done
+              [ "$ALL_BUILDCACHE" = "1" ] || continue
+              [ -n "$TAGS" ] || continue
+              # Every tag here is buildcache-<version>-<arch>; parse a version
+              # out of the first one.
+              V=""
+              for t in $TAGS; do
+                t="${t#buildcache-}"
+                t="${t%-amd64}"
+                t="${t%-arm64}"
+                V="$t"
+                [ -n "$V" ] && break
+              done
+              if [ -z "$V" ]; then
+                echo "keep unparseable buildcache tag '$TAGS' (version $id)"
+              elif version_ge "$V" "$MIN_SUPPORTED"; then
+                echo "keep buildcache-$V (version $id)"
+              else
+                echo "delete buildcache-$V (version $id)"
+                curl -fsS -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+                     "$BASE/versions/$id" \
+                  && DELETED=$((DELETED+1)) \
+                  || echo "  WARNING: cannot delete version $id (token lacks delete:packages?)"
+              fi
+            done
+            PAGE=$((PAGE+1))
+          done
+          echo "done: deleted $DELETED buildcache version(s) below floor $MIN_SUPPORTED"
