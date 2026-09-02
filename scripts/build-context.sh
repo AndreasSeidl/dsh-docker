@@ -49,6 +49,8 @@ TAR_EXCLUDES=(--exclude='./.git' \
               --exclude='./*.tsbuildinfo')
 
 fingerprint() {
+  local dflt
+  dflt="$(find "$REPO_ROOT/container/defaults" -type f -print 2>/dev/null | sort)"
   (
     set -e
     cd "$DSH_SRC"
@@ -57,7 +59,7 @@ fingerprint() {
   sha256sum "$REPO_ROOT/Dockerfile" \
     "$REPO_ROOT/container/bin/docker-entrypoint.sh" \
     "$REPO_ROOT"/container/scripts/*.mjs \
-    "$REPO_ROOT"/container/defaults/* 2>/dev/null | sha256sum -
+    $dflt 2>/dev/null | sha256sum -
 }
 
 # Idempotence gate: reuse the already-staged context when nothing changed.
@@ -83,7 +85,7 @@ tar -C "$DSH_SRC" \
 mkdir -p "$CONTEXT_DIR/.container/bin" "$CONTEXT_DIR/.container/scripts" "$CONTEXT_DIR/.container/defaults"
 cp "$REPO_ROOT/container/bin/docker-entrypoint.sh" "$CONTEXT_DIR/.container/bin/docker-entrypoint.sh"
 cp "$REPO_ROOT"/container/scripts/*.mjs "$CONTEXT_DIR/.container/scripts/"
-cp "$REPO_ROOT"/container/defaults/* "$CONTEXT_DIR/.container/defaults/"
+cp -r "$REPO_ROOT"/container/defaults/. "$CONTEXT_DIR/.container/defaults/"
 cp "$REPO_ROOT/Dockerfile" "$CONTEXT_DIR/Dockerfile"
 
 # Manifest mirror for the layer-caching install: every workspace package.json

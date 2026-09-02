@@ -259,7 +259,7 @@ volumes and nothing else writable on the container's filesystem:
 
 | Mount in container | Volume | What lives there |
 |---|---|---|
-| `/home/dsh/.dsh` | `dsh-server-home` | everything persistent about the harness: `settings.yaml`, credentials, sessions/chat history, **the workspace registry** (which workspaces exist, renames, archives), `AGENTS.md`, plugins |
+| `/home/dsh/.dsh` | `dsh-server-home` | everything persistent about the harness: `settings.yaml`, credentials, sessions/chat history, **the workspace registry** (which workspaces exist, renames, archives), plugins |
 | `/workspaces` | `dsh-server-workspaces` | the workspace **file trees** — one directory per workspace |
 
 ### Workspace selection works over the wire
@@ -487,6 +487,24 @@ See [all variables](#all-environment-variables) for the complete list.
 
 ---
 
+## Adding executables (no rebuild)
+
+The image ships a lean runtime on a read-only filesystem and bakes in only the
+recommended utilities. To make another executable available to the harness and
+every agent, drop the file into `~/.dsh/.local/bin` on the `dsh-home` volume —
+it's first on `PATH`, so a single static binary becomes a command immediately
+(no reload, no rebuild):
+
+```sh
+docker cp ./my-tool dsh-server:/home/dsh/.dsh/.local/bin/
+docker exec dsh-server chmod +x /home/dsh/.dsh/.local/bin/my-tool
+```
+
+Agents install the tooling **they** need into their own workspace — the one
+place their sandbox permits writes — and it persists on the workspace volume.
+
+---
+
 ## Troubleshooting
 
 **`<path>/.env sets "DSH_…", which only the launching environment may set`.** The
@@ -644,7 +662,6 @@ automatically.
 ### Harness & providers (pass straight through)
 
 - `DSH_TELEMETRY_DISABLED` — opt out of telemetry (any non-empty value).
-- `DSH_TOOLS_MODE` — `native` / `code` / `both` tool presentation.
 - `DEEPSEEK_API_KEY`, `DEEPSEEK_BASE_URL` — the shipped DeepSeek adapter
   (credentials can equally live in `.credentials.yaml` on the volume).
 - Any pi-ai provider keys referenced from `settings.yaml` (e.g. `DGX_API_KEY`).
@@ -674,7 +691,6 @@ missing.
 │   └── web/             # the auto-initialized web profile
 ├── .pnpm-store/         # pnpm content store for `dsh plugin add` (persists installs)
 ├── settings.yaml        # seeded on first boot; model selection, UI preferences
-├── AGENTS.md            # seeded on first boot; your user-global instruction file
 ├── .credentials.yaml    # provider credentials
 ├── sessions/            # conversation history
 ├── storages/            # persisted storage domains
@@ -682,12 +698,10 @@ missing.
 ```
 
 On first boot the image seeds an empty `$DSH_HOME` with a scaffold
-`settings.yaml` (empty, so stock defaults apply) and `AGENTS.md` (the
-user-global briefing the agent loads before every session), then
-auto-initializes the `web` profile. Existing files are never overwritten. In
-**server mode** a server-flavoured `AGENTS.md` and an extra `cordis.patch.yml`
-— which pins the web profile to the in-app directory browser (see
-[Server mode](#server-mode)) — are seeded as well.
+`settings.yaml` (empty, so stock defaults apply), then auto-initializes the
+`web` profile. Existing files are never overwritten. In **server mode** an
+extra `cordis.patch.yml` — which pins the web profile to the in-app directory
+browser (see [Server mode](#server-mode)) — is seeded as well.
 
 Inside the container the `dsh` user owns `/workspace`, `/home/dsh`, and the
 install at `/app`. Everything else is reachable only through volumes you mount,

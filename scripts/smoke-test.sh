@@ -92,10 +92,6 @@ check "defaults seeded: settings.yaml" \
   docker run --rm --entrypoint /bin/sh \
     -v "$HVOL:/home/dsh/.dsh" -v "$WVOL:/workspace" \
     "$IMAGE" -c 'test -f /home/dsh/.dsh/settings.yaml'
-check "defaults seeded: AGENTS.md" \
-  docker run --rm --entrypoint /bin/sh \
-    -v "$HVOL:/home/dsh/.dsh" -v "$WVOL:/workspace" \
-    "$IMAGE" -c 'grep -q "Container environment briefing" /home/dsh/.dsh/AGENTS.md'
 
 echo "== boot the web GUI with volumes (no configuration at all) =="
 CID=$(docker run -d -p "$PORT:3080" \
@@ -222,14 +218,14 @@ fi
 
 echo "== first-boot seeding is idempotent (user edits survive) =="
 PORT3=$((PORT+6))
-docker exec "$CID2" sh -c 'echo "USER EDITED" >> /home/dsh/.dsh/AGENTS.md'
+docker exec "$CID2" sh -c 'echo "locale: en-US" >> /home/dsh/.dsh/settings.yaml'
 CID3=$(docker run -d -p "$PORT3:3080" \
   -v "$HVOL2:/home/dsh/.dsh" \
   -v "$WVOL:/workspace" \
   "$IMAGE")
 containers+=("$CID3")
-check "user AGENTS.md edit survives a recreation (no re-seed overwrite)" \
-  docker exec "$CID3" grep -q "USER EDITED" /home/dsh/.dsh/AGENTS.md
+check "user settings.yaml edit survives a recreation (no re-seed overwrite)" \
+  docker exec "$CID3" grep -q "locale: en-US" /home/dsh/.dsh/settings.yaml
 docker rm -f "$CID3" >/dev/null 2>&1
 
 echo "== baked pnpm global config (plugin installs work out of the box) =="

@@ -21,8 +21,7 @@
 #                        operators pick/create workspaces without any host
 #                        display), a `workspaces` symlink appears in the
 #                        harness home so the browser starts at the workspace
-#                        root, and a server-flavoured AGENTS.md scaffold is
-#                        seeded. See docker-compose.server.yml.
+#                        root. See docker-compose.server.yml.
 #   DSH_WORKSPACE        Working directory the harness uses as its default
 #                        workspace root (its process.cwd). Defaults to
 #                        /workspace — the volume-backed agent workspace
@@ -69,12 +68,11 @@
 #   `shell`          -> an interactive bash shell with the same user and mounts
 #   `container-help` -> a short usage summary for this image
 #
-# On the FIRST boot of an empty $DSH_HOME volume the entrypoint seeds default
-# settings.yaml and AGENTS.md (the harness's fixed user-global instructions)
-# from the image-provided copies under /opt/dsh/defaults. Existing files are
-# never touched.
+# On the FIRST boot of an empty $DSH_HOME volume the entrypoint seeds a default
+# settings.yaml from the image-provided copy under /opt/dsh/defaults. Existing
+# files are never touched.
 #
-# Every other variable (DSH_HOME, DSH_TELEMETRY_DISABLED, DSH_TOOLS_MODE,
+# Every other variable (DSH_HOME, DSH_TELEMETRY_DISABLED,
 # DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, provider keys, HTTP(S)_PROXY, TZ, ...)
 # is inherited straight into the process and the harness's layered environment.
 set -eu
@@ -238,9 +236,7 @@ mkdir -p "$DSH_HOME" 2>/dev/null || true
 #   * seed a cordis.patch.yml that pins the in-app directory browser (the
 #     remote-safe picker) — never a native OS dialog on an unattended server,
 #   * symlink the workspace root into the harness home so the browser's
-#     home-anchored listing starts at /workspaces,
-#   * seed the server-flavoured AGENTS.md scaffold (the generic loop below
-#     then finds AGENTS.md present and leaves it alone).
+#     home-anchored listing starts at /workspaces.
 if [ "${DSH_SERVER_MODE:-0}" != "0" ]; then
   if [ -z "${DSH_WORKSPACE:-}" ]; then
     DSH_WORKSPACE="/workspaces"
@@ -264,10 +260,6 @@ if [ "${DSH_SERVER_MODE:-0}" != "0" ]; then
       cp "/opt/dsh/defaults/cordis.patch.yml" "$DSH_HOME/cordis.patch.yml" 2>/dev/null || true
       [ -f "$DSH_HOME/cordis.patch.yml" ] && echo "dsh: seeded server-mode cordis.patch.yml into $DSH_HOME (pins the in-app directory browser)" >&2
     fi
-    if [ ! -e "$DSH_HOME/AGENTS.md" ] && [ -f "/opt/dsh/defaults/AGENTS.server.md" ]; then
-      cp "/opt/dsh/defaults/AGENTS.server.md" "$DSH_HOME/AGENTS.md" 2>/dev/null || true
-      [ -f "$DSH_HOME/AGENTS.md" ] && echo "dsh: seeded server-mode AGENTS.md into $DSH_HOME" >&2
-    fi
     # The in-app browser lists the home directory first; a `workspaces` entry
     # there takes the operator straight to the workspace root.
     if [ -d "$DSH_WORKSPACE" ] && [ ! -e "/home/dsh/workspaces" ]; then
@@ -277,7 +269,7 @@ if [ "${DSH_SERVER_MODE:-0}" != "0" ]; then
 fi
 
 if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
-  for f in settings.yaml AGENTS.md; do
+  for f in settings.yaml; do
     if [ ! -e "$DSH_HOME/$f" ] && [ -f "/opt/dsh/defaults/$f" ]; then
       cp "/opt/dsh/defaults/$f" "$DSH_HOME/$f"
       echo "dsh: seeded default $f into $DSH_HOME" >&2
@@ -295,6 +287,25 @@ if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
   mkdir -p "$DSH_HOME/.ssh"
   chmod 700 "$DSH_HOME/.ssh"
 fi
+
+# ── Operator-extensible executables ─────────────────────────────────────────
+# The image ships a deliberately lean runtime on a read-only filesystem, so
+# there is no "edit the image to add a tool" workflow: everything extra lives
+# on the PERSISTED home volume, no rebuild needed. The whole mechanism:
+#   * "$DSH_HOME/.local/bin" is FIRST on PATH — the operator drops any single
+#     static executable there (docker cp, or a bind mount of the volume) and
+#     it becomes a command for the harness and every process the agent spawns.
+#   * Agents install the tooling THEY need into their own workspace — the one
+#     place their sandbox permits writes — and it persists on the workspace
+#     volume.
+# Nothing else is baked in.
+if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
+  mkdir -p "$DSH_HOME/.local/bin" 2>/dev/null || true
+fi
+case ":$PATH:" in
+  *":$DSH_HOME/.local/bin:"*) ;;
+  *) export PATH="$DSH_HOME/.local/bin:$PATH" ;;
+esac
 
 # The invoking directory is the harness's default workspace root (the same
 # rule as `pnpm dsh web`). In the container that is the workspace the user

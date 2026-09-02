@@ -343,6 +343,12 @@ COPY --chown=dsh:dsh .container/scripts/heal-workspace-links.mjs \
 # break traversal for the unprivileged user.)
 COPY --chown=root:root .container/defaults /opt/dsh/defaults
 
+# The entrypoint later copies these defaults into an unprivileged user's volume.
+# Normalize modes here: some staging paths deliver 0600 (which the dsh user then
+# could not read), so pin files to 0644 and keep dirs traversable at 0755.
+RUN find /opt/dsh/defaults -type f -exec chmod 0644 {} + \
+ && find /opt/dsh/defaults -type d -exec chmod 0755 {} +
+
 # Heal the workspace cross-links AFTER the copy: pnpm's `--prod` install leaves
 # them missing/unreliable, and any links created under /build would point at
 # absolute /build paths. Re-running the heal at /app rewrites every workspace

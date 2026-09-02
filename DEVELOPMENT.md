@@ -12,10 +12,10 @@ container/             files copied into the image with the source
   bin/docker-entrypoint.sh   env → `dsh web` flag mapping; seeds defaults;
                              also drives SERVER mode (DSH_SERVER_MODE): default
                              workspace root /workspaces, seeds the browse-pin
-                             cordis.patch.yml + server AGENTS.md, symlinks the
+                             cordis.patch.yml, symlinks the
                              workspaces root into the harness home
-  defaults/           first-boot scaffolds: settings.yaml, AGENTS.md,
-                      AGENTS.server.md + cordis.patch.yml (server mode)
+  defaults/           first-boot scaffolds: settings.yaml,
+                      cordis.patch.yml (server mode)
   scripts/            reverse-proxy.mjs (network/proxy mode),
                       inject-randomuuid-polyfill.mjs,
                       heal-workspace-links.mjs
