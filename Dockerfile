@@ -274,7 +274,7 @@ ARG DSH_INCLUDE_BUILD_TOOLS=1
 # node-pty-style addons); verified by scripts/plugin-test.sh.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-      bash ca-certificates curl git openssh-client tini \
+      bash ca-certificates curl file git jq less openssh-client procps rsync unzip wget xz-utils tini \
       $(if [ "${DSH_INCLUDE_BUILD_TOOLS}" = "1" ]; then echo gcc g++ make python3 pkg-config; fi) \
  && rm -rf /var/lib/apt/lists/*
 
