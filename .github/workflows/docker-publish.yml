@@ -254,30 +254,37 @@ jobs:
           # untagged, content-addressed version (searchable by digest, never
           # shown among tagged releases). The merge job joins the raw digests.
           outputs: type=image,name=${{ steps.image.outputs.image }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
-          # Warm-cache plumbing, over two stores with different retention
-          # semantics (see DEVELOPMENT.md "Cache hygiene"):
-          #  * gha cache (type=gha) is SELF-MANAGING — GitHub caps it per repo
-          #    (~10 GB), evicting LRU / 7-day-stale entries, so it can never
-          #    grow without bound. mode=min stores ONLY the final-image layers:
-          #    the shared base (debian+node+apt) plus each version's /app layer
-          #    — exactly the cross-version, cross-run reusable subset. mode=max
-          #    also persisted every builder intermediate (a full pnpm tree +
-          #    compile state per version) and 5 versions × 2 arches of that
-          #    exceeded the cap and LRU-evicted the shared base back out, so
-          #    `all` runs kept starting ~cold; min fits and the base survives.
-          #  * registry buildcache (type=registry) per (version × arch) tag on
-          #    GHCR keeps the builder/compile layers (mode=max) so a republish
-          #    of an already-built version — e.g. the container-layer-fix `all`
-          #    run, where the harness source is unchanged — REPLAYS the
-          #    install+compile instead of re-running it. It has NO automatic
-          #    eviction; the prune-buildcache job bounds it to versions at/above
-          #    the supported floor (anything below the floor is dead weight).
-          # Per-arch gha scopes keep amd64/arm64 caches independent.
+          # The registry buildcache (type=registry) is the ONE store a publish
+          # writes to — per (version × arch) tag on GHCR, mode=max. It is what
+          # a republish — e.g. the container-layer-fix `all` run, where the
+          # harness source is unchanged — REPLAYS install+compile from instead
+          # of re-running. Two refs are read:
+          #  * buildcache-<version>-<arch> — full replay of a previously built
+          #    version;
+          #  * buildcache-<latest>-<arch> (the NEWEST version's buildcache) —
+          #    the shared base (debian+node+apt) layers are blob-identical
+          #    across all versions and GHCR stores a given blob once, so a
+          #    brand-new version that has never been built still warms its base
+          #    up from here at ~no additional storage cost. (For the newest
+          #    version's own leg both refs coincide; buildx dedups.) The newest
+          #    version comes from the `resolve` job's `latest` output.
+          # The gha cache (type=gha) is only READ, never written here:
+          # BuildKit's gha cache EXPORT to GitHub's cache service hangs
+          # indefinitely on large layer uploads (observed on buildx v0.36.1 /
+          # BuildKit v0.32.2 — a fully-cached `all` run stuck >1 h on one layer
+          # while the registry export wrote the identical layers in ~2 s), and
+          # every benefit gha could add (base warmth, cross-run reuse) is
+          # already covered by the registry refs above. Reads harvest the old
+          # entries until GitHub evicts them (LRU / 7-day stale), then become
+          # no-ops. The registry cache has NO automatic eviction, so the
+          # prune-buildcache job bounds it to versions at/above the supported
+          # floor (anything below the floor is dead weight).
+          # Per-arch scopes/refs keep amd64/arm64 caches independent.
           cache-from: |
             type=gha,scope=dsh-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
+            type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
           cache-to: |
-            type=gha,mode=min,scope=dsh-${{ matrix.arch }}
             type=registry,mode=max,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
           # Disable BuildKit's default SLSA provenance/SBOM attestations: they
           # are pushed as extra index entries with no os/arch and show up as

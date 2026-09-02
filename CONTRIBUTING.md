@@ -166,18 +166,17 @@ harness versions map 1:1 (`v`-prefix optional).
 > (`docker context create builders` + `endpoint:`) is not needed on the runners
 > this repo uses.
 
-CI cache is **`type=gha` only** (GitHub's Actions cache), exported with
-`mode=max` and a per-arch `scope` so the builder stages stay warm between runs.
-It is *self-managing*: GitHub caps it per repository (~10 GB on public repos)
-and evicts LRU / 7-day-stale entries, so it cannot grow without bound. Note
-that the cache is only seeded by a **successful** run — a run that dies during
-push or build aborts the cache export, so the next build starts cold. Earlier
-versions also exported a `type=registry` cache tagged `<image>:buildcache` on
-GHCR — that one is **additive with no automatic size eviction** and would have
-accumulated cache blobs on GHCR indefinitely (the registry analogue of the
-bounded-on-the-host cache problem in [DEVELOPMENT.md](DEVELOPMENT.md)), so it
-was removed. Runs are infrequent (only on real upstream releases), so an
-occasional cold start when the 7-day TTL evicts the cache first is fine.
+CI caching runs on the **registry buildcache** (`type=registry, mode=max`,
+tagged `<image>:buildcache-<version>-<arch>` on GHCR) — the one store the
+publish workflow writes to, and the reason a recipe-change `all` republish
+replays install+compile instead of recompiling. Each build also reads the
+newest version's buildcache for the shared base (blob-deduped on GHCR, so it
+costs ~nothing extra). The GitHub Actions cache (`type=gha`) is only READ —
+it harvests old entries until GitHub evicts them (LRU / 7-day stale) and is
+never written, because BuildKit's gha cache export has proven to hang on large
+layer uploads in this repo. The registry cache has no automatic eviction, so
+the `prune-buildcache` job bounds it to versions at/above the supported floor
+on every publish (see [DEVELOPMENT.md](DEVELOPMENT.md)).
 
 > **Why some published tags show an `unknown/unknown` platform.** Builds before
 > the `provenance: false` change were pushed by `docker/build-push-action` with

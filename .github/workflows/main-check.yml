@@ -135,6 +135,9 @@ jobs:
             REF="master"
           fi
           echo "ref=$REF" | tee -a "$GITHUB_OUTPUT"
+          # Plain version (no dsh-v prefix) — empty on the master fallback —
+          # for the registry buildcache ref below.
+          echo "version=$VERSION" | tee -a "$GITHUB_OUTPUT"
 
       - name: Checkout harness source
         uses: actions/checkout@v5
@@ -150,6 +153,13 @@ jobs:
       - name: Stage the build context
         run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
 
+      - name: Compute image name
+        id: image
+        # GHCR refs must be all-lowercase (github.repository keeps the owner's
+        # case), so derive it via bash's @L expansion — that only works inside
+        # a run step, not in action-input expressions.
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY@L}" | tee -a "$GITHUB_OUTPUT"
+
       - uses: docker/setup-buildx-action@v4
 
       - name: Build (linux/amd64, no push)
@@ -160,10 +170,18 @@ jobs:
           push: false
           load: true
           tags: dsh-main-check:check
-          # Self-managing GHA cache (independent scope from the publish lanes so
-          # a guard run never contends with or pollutes the publish caches).
-          cache-from: type=gha,scope=dsh-guard-amd64
-          cache-to: type=gha,mode=max,scope=dsh-guard-amd64
+          # Read-only caches. gha (independent scope from the publish lanes)
+          # harvests old entries until GitHub evicts them (LRU / 7-day stale);
+          # the NEWEST version's registry buildcache from the last publish
+          # warms the base + install/compile layers, so a guard re-check of an
+          # already-published version replays instead of recompiling. Nothing
+          # is WRITTEN: gha cache export has proven to hang on this repo (see
+          # the docker-publish build job), and a PR gate is the last place to
+          # risk that. When the newest version is unknown (master fallback) the
+          # registry ref resolves to '' and is dropped; only gha is read.
+          cache-from: |
+            type=gha,scope=dsh-guard-amd64
+            ${{ steps.upstream.outputs.version && format('type=registry,ref={0}:buildcache-{1}-amd64', steps.image.outputs.image, steps.upstream.outputs.version) || '' }}
           provenance: false
           sbom: false
           build-args: |

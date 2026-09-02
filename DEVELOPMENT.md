@@ -218,16 +218,24 @@ cross-filesystem cache mount costs ~10 MB of compressed image size (+3%) versus 
 mount. CI publishes/consumes `type=gha` + registry build caches, so Actions builds
 start warm after the first run.
 
-**On CI the two stores are bounded differently.** The publish workflow caches
-two ways: a `type=gha` cache (`mode=min` — final-image layers only, so the
-~10 GB GitHub cap never thrashes the shared base back out of cache) and a
-per-version registry buildcache (`type=registry, mode=max` under
-`ghcr.io/<owner>/dsh-docker:buildcache-<version>-<arch>`) that keeps the
-install/compile stages so an already-built version replays instead of
-recompiling. Registry buildcache has **no automatic eviction**, so the
-workflow's `prune-buildcache` job deletes any buildcache version whose version
-is below the supported floor on every publish — the cache is bounded by the set
-of supported versions, and the job is deliberately non-fatal (a missing
+**On CI the publish cache is the per-version registry buildcache.** The
+`docker-publish` build writes `type=registry, mode=max` under
+`ghcr.io/<owner>/dsh-docker:buildcache-<version>-<arch>` and reads two refs:
+its own (full replay of an already-built version) and the NEWEST version's
+buildcache (`buildcache-<latest>-<arch>`) for the shared base — the base
+(debian+node+apt) layers are blob-identical across versions and GHCR stores a
+given blob once, so that extra read costs ~no additional storage, and a
+brand-new version still warms its base up instead of starting cold. The GitHub
+Actions cache (`type=gha`) is only READ, never written: BuildKit's gha cache
+EXPORT has been observed to hang indefinitely on large layer uploads here (a
+fully-cached `all` run stuck >1 h exporting a layer that the registry store
+wrote in ~2 s — buildx v0.36.1 / BuildKit v0.32.2), and every benefit gha could
+add is already covered by the registry refs. gha keeps harvesting the old
+entries until GitHub evicts them (LRU / 7-day stale), then becomes a no-op.
+The registry buildcache has **no automatic eviction**, so the workflow's
+`prune-buildcache` job deletes any buildcache version whose version is below
+the supported floor on every publish — the cache is bounded by the set of
+supported versions, and the job is deliberately non-fatal (a missing
 `delete:packages` token never blocks a publish).
 
 ## Cache hygiene (keeping the build cache bounded)
@@ -251,6 +259,7 @@ experiments reached ~100 GB back-to-back. Two things keep it manageable:
   order). Same-commit rebuilds stay warm (~2 s layer reuse / ~40 s incremental);
   cross-commit builds always start from a clean compile.
 
-On CI the same effect is handled by the workflow (see CONTRIBUTING.md):
-GitHub's Actions cache caps and evicts automatically, and the unbounded
-registry buildcache was removed.
+On CI the same effect is handled by the workflow (see the "On CI" section
+above and CONTRIBUTING.md): the gha cache is read-only (GitHub caps and evicts
+it automatically) and the registry buildcache — the actual cross-run store now —
+is bounded by the `prune-buildcache` job.
