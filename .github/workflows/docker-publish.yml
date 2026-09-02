@@ -95,7 +95,7 @@ jobs:
       min_supported: ${{ steps.version.outputs.min_supported }}
     steps:
       - name: Checkout this repo (supported-version floor)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve version(s) to build
         id: version
@@ -186,7 +186,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout this repo (recipe + build scripts)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Resolve upstream ref (${{ matrix.version }})
         id: upstream
@@ -210,7 +210,7 @@ jobs:
           echo "ref=$REF" | tee -a "$GITHUB_OUTPUT"
 
       - name: Checkout harness source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: deepseek-ai/deepseek-harness
           ref: ${{ steps.upstream.outputs.ref }}
@@ -227,10 +227,10 @@ jobs:
         run: echo "PLATFORM_PAIR=linux-${{ matrix.arch }}" >> "$GITHUB_ENV"
 
       # Native per-arch builds — no QEMU setup needed on either runner.
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -246,7 +246,7 @@ jobs:
 
       - name: Build and push by digest (linux/${{ matrix.arch }})
         id: build
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .docker-context
           platforms: linux/${{ matrix.arch }}
@@ -289,7 +289,7 @@ jobs:
           printf '%s' "${digest#sha256:}" > "/tmp/digests/${{ matrix.version }}__${{ matrix.arch }}.digest"
 
       - name: Upload digest
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           # Unique name per leg (version × arch) so concurrent uploads never
           # contend on the same artifact; the file name carries the same info.
@@ -315,17 +315,17 @@ jobs:
         include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
     steps:
       - name: Checkout this repo (tests + compose files + floor)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -379,23 +379,23 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout this repo (supported-version floor)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Download digests
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: /tmp/digests
           pattern: digests-*
           merge-multiple: true
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
 
       - name: Compute image
         id: meta
