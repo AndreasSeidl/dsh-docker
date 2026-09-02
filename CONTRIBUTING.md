@@ -28,7 +28,8 @@ suites see [TESTING.md](TESTING.md).
 Follow the commit style already in the log: `feat:`, `fix:`, `docs:`, `ci:`,
 `container:` for image/wiring changes, etc. Keep user-facing usage changes in
 `README.md`; the maintainer-facing depth lives in `DEVELOPMENT.md` /
-`TESTING.md`. Releases are driven purely by git tags (below) — no separate
+`TESTING.md`. Releases are driven by the publish workflows (see
+[CI & publishing](#ci--publishing-docker-publish-workflow)) — no separate
 release branch juggling.
 
 ## Supported version floor
@@ -67,7 +68,7 @@ version ships and passes, move the floor up to it; tags below it simply stop
 being tested (they stay on GHCR as immutable artifacts).
 
 Bumping the floor is a one-file change: edit `.supported-version` and push.
-The README floor sentence is generated from it — the `docs-supported-version`
+The README floor sentence is generated from it — the `main-check`
 workflow re-states it and commits the result back on every push to main, so the
 two can never drift and nothing needs editing by hand. (To re-state it locally,
 `make docs-sync` or `./scripts/sync-supported-version.sh`; pull requests run the
@@ -80,23 +81,30 @@ needs to move instead.
 
 ## CI & publishing (`docker-publish` workflow)
 
-`.github/workflows/docker-publish.yml` builds and pushes to GHCR:
+`.github/workflows/docker-publish.yml` builds and pushes to GHCR. It is never
+triggered by a git tag — publishing happens from three entry points:
 
-- **on every tag** — `git tag v0.1.1-rc.2` (or `0.1.1-rc.2`) pins the harness
-  at that upstream version and publishes
-  `ghcr.io/<owner>/dsh-docker:<version>` and `:latest`;
-- **automatically on new upstream releases** — `.github/workflows/check-upstream-release.yml`
+- **on new upstream releases** — `.github/workflows/check-upstream-release.yml`
   polls every hour (17 min past) for upstream `dsh-v*` release tags, compares
   them with the versions already on GHCR, and when a newer one is not yet
-  published calls this workflow (via `workflow_call`) with that exact version.
-  The check is one tiny job when there is nothing new; only a genuinely new
-  upstream tag starts the multi-arch build, and while a `docker-publish` run is
-  already in progress the tick is skipped so the newest release is never built
-  twice. Upstream currently releases everything as a prerelease
-  (`dsh-v0.1.2-alpha.2`), so the poller looks at *all* `dsh-v*` tags rather than
-  GitHub's `releases/latest` (which is empty until a stable ships);
+  published calls the publish workflow (via `workflow_call`) with that exact
+  version. The check is one tiny job when there is nothing new; only a
+  genuinely new upstream tag starts the multi-arch build, and while a
+  `docker-publish` run is already in progress the tick is skipped so the newest
+  release is never built twice. Upstream currently releases everything as a
+  prerelease (`dsh-v0.1.2-alpha.2`), so the poller looks at *all* `dsh-v*` tags
+  rather than GitHub's `releases/latest` (which is empty until a stable ships);
+- **on image-affecting changes to main** — `.github/workflows/main-check.yml`
+  runs after every push (and on PRs as a pre-merge gate): it syncs the README's
+  supported-version floor, then builds the image once and asserts hygiene
+  (agent-CLI purge intact, `/app` under the size ceiling). If that guard is
+  green and the push touched image-affecting files (`Dockerfile`, `container/**`,
+  `scripts/build-context.sh`), it calls the publish workflow with `version: all`
+  — re-publishing every GHCR tag at/above the supported floor with the new
+  recipe, exactly like a container-layer fix;
 - **manually** — `workflow_dispatch` accepts a `version` (tag or commit) input;
-  leave it empty to build the **newest upstream release**.
+  leave it empty to build the **newest upstream release**, or use `all` to
+  re-publish every supported version.
 
 There is deliberately **no schedule** and no `nightly` tag: only real upstream
 releases are ever published (under `<version>`, with `:latest` aliasing the
@@ -212,16 +220,18 @@ upstream cuts a new `dsh-v<version>` release, the hourly
 `check-upstream-release` workflow picks it up and publishes
 `ghcr.io/<owner>/dsh-docker:<version>` (+ `:latest`) on its own.
 
-Pushing a tag is the explicit/override path (e.g. to force-build or to pin a
-specific version before the next hourly poll):
+When **our own recipe** changes (Dockerfile, entrypoint, defaults, staging
+script), `main-check` handles it: the merged push runs the hygiene guard and —
+if green and image-affecting — re-publishes every supported version
+(`docker-publish` with `version: all`).
 
-1. Tag the commit: `git tag v0.1.1-rc.2` (the `v` prefix is optional; the tag is
-   also the harness version to build at).
-2. `git push origin v0.1.1-rc.2` — the workflow builds both archs natively and
-   publishes `ghcr.io/<owner>/dsh-docker:<version>` (+ `:latest`).
+The manual/override path (force a check or a publish without waiting):
+
+1. Run "Run workflow" → `check-upstream-release` to force a fresh upstream poll
+   without waiting for the hour.
+2. Run "Run workflow" → `docker-publish` with a `version` input:
+   - empty → build the **newest upstream release**;
+   - `all` → rebuild every GHCR version tag at/above the supported floor;
+   - a specific version (`0.1.2-alpha.2` or `dsh-v…`) → build that snapshot.
 3. Watch the Actions run; a failure during build/push means the cache wasn't
    exported for the next run, so a retry may start cold.
-
-(You can also run the check workflow manually via `workflow_dispatch` — "Run
-workflow" → `check-upstream-release` — to force a fresh poll without waiting
-for the hour, and the publish workflow manually with a `version` input.)

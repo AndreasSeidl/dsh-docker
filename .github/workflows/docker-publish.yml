@@ -6,22 +6,23 @@
 #   ghcr.io/<owner>/dsh-docker:<version>   (multi-arch, linux/amd64+arm64)
 #   ghcr.io/<owner>/dsh-docker:latest      (alias for the NEWEST version built)
 #
+# This workflow is NOT triggered by git tags (tags are unused in this repo).
+# It runs from three entry points:
+#   * main-check (workflow_call, `version: all`) — an image-affecting change
+#     merged to main, after the hygiene guard passes, re-publishes every
+#     supported version with the new recipe;
+#   * check-upstream-release (workflow_call, a single version) — the hourly
+#     poll, when a newer upstream release appears;
+#   * workflow_dispatch — manual.
+#
 # Version resolution (see the `resolve` job):
-# * On a git TAG (e.g. `v0.1.1-rc.2` or `0.1.1-rc.2`) -> build the harness at
-#   that upstream version. Upstream tags releases as `dsh-v<version>`; the
-#   resolver accepts both the plain and prefixed forms so the tagged snapshot
-#   is built, never master.
-# * Manually (workflow_dispatch) `version` input:
-#     - a specific version -> build that upstream tag/commit;
-#     - `all` -> rebuild EVERY version tag currently published on GHCR that is
-#       at/above the supported floor (.supported-version). This is how a
-#       container-layer fix (e.g. the bundled proxy) is re-published across all
-#       supported releases at once; the NEWEST of them gets the `latest` alias.
-#     - empty -> resolve the NEWEST upstream release and build it (so a "rebuild
-#       latest" is always a real release, never a default branch).
-# * Reusable (workflow_call, `version` input) -> called by the hourly
-#   check-upstream-release workflow when a newer upstream release appears
-#   (single version; `all` is for manual rebuilds).
+# * `all` -> rebuild EVERY version tag currently published on GHCR that is
+#   at/above the supported floor (.supported-version). This is how a
+#   container-layer fix (e.g. the bundled proxy) is re-published across all
+#   supported releases at once; the NEWEST of them gets the `latest` alias.
+# * a specific version -> build that upstream tag/commit.
+# * empty -> resolve the NEWEST upstream release and build it (so a "rebuild
+#   latest" is always a real release, never a default branch).
 #
 # Native multi-arch (no QEMU) — structure adapted from
 # sredevopsorg/multi-arch-docker-github-workflow (MIT, (c) 2025 SREDevOps.org;
@@ -51,8 +52,6 @@
 name: docker-publish
 
 on:
-  push:
-    tags: ['v*', '[0-9]*']
   workflow_dispatch:
     inputs:
       version:
@@ -111,11 +110,7 @@ jobs:
           version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 
           VERSIONS=()
-          if [ "${{ github.event_name }}" = "push" ] && [[ "$GITHUB_REF" == refs/tags/* ]]; then
-            V="${GITHUB_REF#refs/tags/}"
-            V="${V#v}"                                # accept both v0.1.1-rc.2 and 0.1.1-rc.2
-            VERSIONS=("$V")
-          elif [[ "${{ inputs.version }}" =~ ^[Aa][Ll][Ll]$ ]]; then
+          if [[ "${{ inputs.version }}" =~ ^[Aa][Ll][Ll]$ ]]; then
             # 'all': every version tag this repo has on GHCR at/above the floor.
             # The container recipe (Dockerfile + bundled proxy + entrypoint) is
             # the same for every version, so a fix there lands on all of them.

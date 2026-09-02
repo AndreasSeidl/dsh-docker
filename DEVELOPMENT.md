@@ -171,8 +171,8 @@ Three independent layers now keep that class of bug from shipping again:
    instead of silently shipping 300 extra MB. Also fixed a latent arm64 gap:
    the old globs only removed `linux-x64`, so the CI arm64 leg would have kept
    `claude-agent-sdk-linux-arm64`.
-2. **CI size guard (`image-hygiene.yml`).** Runs on PRs into `main`, commits to
-   `main`, and tag pushes. It builds the image from the current harness source
+2. **CI size guard (`main-check.yml`).** Runs on PRs into `main`, commits to
+   `main`. It builds the image from the current harness source
    (same upstream-tag-resolution fallback as the publish workflow), then
    asserts (a) no agent-CLI platform packages remain in `/app/node_modules`,
    and (b) image content stays under `SIZE_CEILING_BYTES` (default

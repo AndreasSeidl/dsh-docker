@@ -188,7 +188,7 @@ RUN --mount=type=cache,target=/pnpm-cache \
 # 0.3.220 -> 0.3.241, codex 0.147 -> 0.149). The tripwire below fails the build
 # if the purge ever stops matching (a package rename, a new arch suffix), so a
 # size regression cannot slip through silently again. The CI guard in
-# .github/workflows/image-hygiene.yml is the independent second line: it also
+# .github/workflows/main-check.yml is the independent second line: it also
 # asserts package absence in the final image and a size ceiling before anything
 # is tagged/published.
 ARG DSH_INCLUDE_AGENT_CLIS=0

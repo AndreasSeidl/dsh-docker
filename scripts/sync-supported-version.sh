@@ -6,8 +6,8 @@
 #   ./scripts/sync-supported-version.sh --check  verify README matches (CI)
 #
 # Bump the floor by editing .supported-version, then run this script (or
-# `make docs-sync`). The docs-supported-version CI job runs `--check` on every
-# push, so the README and the floor can never drift apart.
+# `make docs-sync`). The main-check CI job runs `--check` on every push, so the
+# README and the floor can never drift apart.
 set -eu
 
 REPO="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)"

@@ -1,0 +1,210 @@
+# One "after-commit" stage for the repo: docs floor sync, then the image
+# hygiene gate, then a conditional republish of every supported version.
+#
+# This workflow replaces the old image-hygiene.yml + docs-supported-version.yml
+# and folds in the recipe-change publish trigger. Order is deliberate:
+#   1. docs-sync        — regenerate the README supported-version floor and
+#                         commit it back ([skip ci]) BEFORE anything else;
+#   2. guard            — build the image once (amd64, cached, no push) and
+#                         assert the agent-CLI purge still holds and /app is
+#                         under the size ceiling. This is the gate;
+#   3. publish-recipes  — ONLY on a push to main that changed image-affecting
+#                         files AND a green guard: call docker-publish with
+#                         `version: all` (re-publish every GHCR tag at/above
+#                         the supported floor with the new recipe, relabel
+#                         `latest`).
+#
+# Git tags deliberately do NOT trigger anything anymore — releases are driven
+# by upstream (check-upstream-release), recipe changes (this workflow's
+# publish-recipes), and manual dispatch.
+#
+# The PR trigger is retained on purpose: the guard runs pre-merge, so a broken
+# or bloated recipe is caught before it ever reaches main (and before
+# publish-recipes could fan out into N×2 failing builds).
+name: main-check
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# The call into the reusable docker-publish caps at THIS workflow's
+# permissions, so packages: write + actions: read are required for the callee
+# (which tags GHCR); contents: write is needed for the docs auto-commit.
+permissions:
+  contents: write
+  actions: read
+  packages: write
+
+jobs:
+  # Which parts of this run are relevant, based on the files the event touched.
+  # dorny/paths-filter diffs the trigger against the base and sets the two
+  # booleans the dependent jobs branch on.
+  paths:
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.filter.outputs.image }}
+      docs: ${{ steps.filter.outputs.docs }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: filter
+        uses: dorny/paths-filter@v3
+        with:
+          # Push → diff the pushed range; PR → diff against the merge base;
+          # manual dispatch has no range, so diff against main (over-triggers
+          # on a manual run are harmless).
+          base: ${{ github.event_name == 'workflow_dispatch' && 'main' || '' }}
+          filters: |
+            image:
+              - 'Dockerfile'
+              - 'container/**'
+              - 'scripts/build-context.sh'
+            docs:
+              - '.supported-version'
+              - 'README.md'
+              - 'CONTRIBUTING.md'
+              - 'scripts/sync-supported-version.sh'
+
+  # 1) Docs floor sync — self-healing, on pushes only. Auto-commits with a
+  #    [skip ci] trailer so the bot commit never re-triggers anything. (The PR
+  #    counterpart is docs-check below, a plain drift assertion.)
+  docs-sync:
+    needs: paths
+    if: needs.paths.outputs.docs == 'true' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Regenerate the README floor from .supported-version
+        run: ./scripts/sync-supported-version.sh
+      - name: Commit the synced README when it drifted
+        run: |
+          git diff --quiet README.md && { echo "README already in sync — nothing to commit"; exit 0; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: sync supported-version floor into README [skip ci]"
+          git push
+
+  docs-check:
+    needs: paths
+    if: needs.paths.outputs.docs == 'true' && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify README floor matches .supported-version
+        run: ./scripts/sync-supported-version.sh --check
+
+  # 2) The guard gate — build once, assert, don't push. Runs pre-merge on PRs
+  #    and post-merge on main whenever the image-affecting files changed.
+  #    `always() &&` makes it run after docs-sync regardless of docs outcome,
+  #    so a docs-commit hiccup never blocks the image gate.
+  guard:
+    needs: [paths, docs-sync]
+    if: always() && needs.paths.outputs.image == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      # Bytes of the /app tree (du -sb /app, measured inside the image — immune
+      # to layer-import/remote-cache size reporting). Fixed image: ~455 MB; if
+      # the agent-CLI purge silently stops matching, this jumps to ~1015 MB.
+      # 650 MB is comfortable headroom for legitimate growth yet far below the
+      # failure mode. Raise it only as a deliberate, documented decision.
+      SIZE_CEILING_BYTES: '650000000'
+    steps:
+      - name: Checkout this repo (recipe + build scripts)
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream ref
+        id: upstream
+        run: |
+          # Prefer the newest released upstream tag over the default branch so
+          # the guard exercises a real release snapshot when one exists.
+          REF="$(git ls-remote --refs --tags \
+                   https://github.com/deepseek-ai/deepseek-harness.git \
+                   'refs/tags/dsh-v*' \
+                   | sed 's#.*refs/tags/dsh-v##; s/\^{}//' | sort -V | tail -1 || true)"
+          [ -n "$REF" ] || REF="master"
+          echo "ref=$REF" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Checkout harness source
+        uses: actions/checkout@v4
+        with:
+          repository: deepseek-ai/deepseek-harness
+          ref: ${{ steps.upstream.outputs.ref }}
+          path: upstream
+
+      - name: Capture source commit
+        id: commit
+        run: echo "commit=$(git -C upstream rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Stage the build context
+        run: DSH_SRC="$(pwd)/upstream" ./scripts/build-context.sh
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Build (linux/amd64, no push)
+        uses: docker/build-push-action@v6
+        with:
+          context: .docker-context
+          platforms: linux/amd64
+          push: false
+          load: true
+          tags: dsh-main-check:check
+          # Self-managing GHA cache (independent scope from the publish lanes so
+          # a guard run never contends with or pollutes the publish caches).
+          cache-from: type=gha,scope=dsh-guard-amd64
+          cache-to: type=gha,mode=max,scope=dsh-guard-amd64
+          provenance: false
+          sbom: false
+          build-args: |
+            DSH_CLIENT_COMMIT_HASH=${{ steps.commit.outputs.commit }}
+
+      - name: Assert agent-CLI platform packages are gone
+        run: |
+          LEFT="$(docker run --rm --entrypoint /bin/sh dsh-main-check:check -c \
+            'find /app/node_modules/.pnpm -maxdepth 1 -type d \( \
+               -name "@anthropic-ai+claude-agent-sdk-linux-*@*" \
+               -o -name "@openai+codex@*-linux-*" \
+               -o -name "@openai+codex-linux-*@*" \) -print 2>/dev/null' )"
+          if [ -n "$LEFT" ]; then
+            echo "agent-CLI platform packages survived the purge:"
+            echo "$LEFT"
+            echo "The harness renamed/changed these packages — update the purge"
+            echo "globs in the Dockerfile (DSH_INCLUDE_AGENT_CLIS=0 default)." >&2
+            exit 1
+          fi
+          echo "OK: no agent-CLI platform packages in the final image"
+
+      - name: Assert image size is under the ceiling
+        env:
+          CEILING: ${{ env.SIZE_CEILING_BYTES }}
+        run: |
+          # du -sb /app inside the image: deterministic, independent of how the
+          # image was loaded/cached on this runner.
+          APP_BYTES="$(docker run --rm --entrypoint /bin/sh dsh-main-check:check -c 'du -sb /app | cut -f1')"
+          echo "app tree: ${APP_BYTES} B (ceiling ${CEILING} B)"
+          if [ -z "$APP_BYTES" ] || [ "$APP_BYTES" -gt "$CEILING" ]; then
+            echo "App tree is ${APP_BYTES:-unknown} B — over the ${CEILING} B ceiling." >&2
+            echo "Find what was pulled in, or raise the ceiling deliberately in" >&2
+            echo ".github/workflows/main-check.yml." >&2
+            exit 1
+          fi
+
+  # 3) Recipe-change publish: a merged push to main that touched image-affecting
+  #    files AND passed the guard re-publishes every supported GHCR version with
+  #    the new recipe. Never fires on PRs, never fires on a red/absent guard.
+  publish-recipes:
+    needs: [paths, guard]
+    # YAML folded scalar: joins to a single GitHub expression line (no `\`
+    # continuations — those are invalid in workflow `if:` expressions).
+    if: >-
+      github.event_name == 'push'
+      && needs.paths.outputs.image == 'true'
+      && needs.guard.result == 'success'
+    uses: ./.github/workflows/docker-publish.yml
+    with:
+      version: all

@@ -153,7 +153,7 @@ drives the test suites and the publish pipeline (see
   remain on GHCR as an immutable artifact, but nothing is guaranteed about it.
 
 The floor stated below is generated from [`.supported-version`](.supported-version)
-(edit the file, not this paragraph — the `docs-supported-version` workflow
+(edit the file, not this paragraph — the `main-check` workflow
 re-states it automatically on every push; `make docs-sync` does the same
 locally).
 
