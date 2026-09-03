@@ -7,13 +7,21 @@
 #   ghcr.io/<owner>/dsh-docker:latest      (alias for the NEWEST version built)
 #
 # This workflow is NOT triggered by git tags (tags are unused in this repo).
-# It runs from three entry points:
-#   * main-check (workflow_call, `version: all`) — an image-affecting change
-#     merged to main, after the hygiene guard passes, re-publishes every
+# It is triggered by workflow_dispatch from three sources:
+#   * main-check — an image-affecting change merged to main, after the hygiene
+#     guard passes, dispatches this with `version: all` to re-publish every
 #     supported version with the new recipe;
-#   * check-upstream-release (workflow_call, a single version) — the hourly
-#     poll, when a newer upstream release appears;
-#   * workflow_dispatch — manual.
+#   * check-upstream-release — the hourly poll dispatches this with the exact
+#     version whenever a newer upstream release appears;
+#   * manual dispatch on the Actions tab.
+#
+# The two automation entry points DISPATCH this via `gh workflow run` rather
+# than calling it through the reusable-workflow `uses:` mechanism: referencing
+# needs.<job>.outputs/result on a reusable-workflow caller job is silently
+# unreliable in GitHub Actions (actions/runner#2495/#3087/#1661;
+# shiv-source/thoth#61; see the NOTE in main-check.yml). A dispatched run is a
+# normal workflow_dispatch run whose GITHUB_TOKEN carries this workflow's own
+# `permissions` block.
 #
 # Version resolution (see the `resolve` job):
 # * `all` -> rebuild EVERY version tag currently published on GHCR that is
@@ -58,16 +66,6 @@ on:
         description: "Upstream dsh version to build. Empty = newest upstream release. 'all' = rebuild every tag on GHCR at/above the supported floor."
         required: false
         default: ''
-  # Reusable entry point: check-upstream-release.yml calls this with an explicit
-  # upstream version whenever an hourly poll finds a newer release. `version` is
-  # mirrored from workflow_dispatch, so the resolution steps below work for
-  # both entry points unchanged.
-  workflow_call:
-    inputs:
-      version:
-        description: 'Upstream dsh version/tag to build'
-        required: false
-        type: string
 
 permissions:
   contents: read

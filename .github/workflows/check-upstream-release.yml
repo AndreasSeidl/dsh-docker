@@ -12,9 +12,10 @@
 #      versions);
 #   3. skip the tick while a docker-publish run is already in progress (so the
 #      newest release is only ever built once);
-#   4. otherwise, if the newest upstream tag is not yet published, call the
-#      docker-publish workflow with that exact version — it builds both archs
-#      natively and pushes `<version>` + `latest`.
+#   4. otherwise, if the newest upstream tag is not yet published, dispatch the
+#      docker-publish workflow (a separate workflow_dispatch run) with that
+#      exact version — it builds both archs natively and pushes `<version>` +
+#      `latest`.
 #
 # When there is nothing new the run is ONE tiny check job (a git ls-remote +
 # a small registry query + one Actions API call, a few seconds of runner time)
@@ -29,12 +30,10 @@ on:
 
 permissions:
   contents: read
-  # Resolving the `uses:` reusable workflow requires actions read permission.
+  # The check job queries the Actions runs API to see whether docker-publish is
+  # already building; that needs read access on workflow runs. The publish job
+  # raises its own scope to actions: write (dispatch only).
   actions: read
-  # The callee (docker-publish) pushes to GHCR and requests `packages: write`;
-  # a reusable call is capped at the CALLER's permissions, so they must be
-  # granted here too or GitHub rejects the workflow as invalid.
-  packages: write
 
 jobs:
   check:
@@ -110,10 +109,20 @@ jobs:
             echo "-> nothing new to publish"
           fi
 
+  # Dispatcher (plain job, NOT a `uses:` reusable-workflow caller): needs*
+  # output plumbing on a reusable call is silently dropped by GitHub Actions
+  # (see the NOTE in main-check.yml), so the decision is read here on a normal
+  # job and the publish is triggered as a separate docker-publish run.
   publish:
-    name: Publish ${{ needs.check.outputs.version }}
+    name: Dispatch docker-publish for ${{ needs.check.outputs.version }}
     needs: check
     if: needs.check.outputs.build_needed == 'true'
-    uses: ./.github/workflows/docker-publish.yml
-    with:
-      version: ${{ needs.check.outputs.version }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - name: Dispatch docker-publish (native multi-arch publish)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: gh workflow run docker-publish.yml --repo "${{ github.repository }}" --ref main --field version="$VERSION"

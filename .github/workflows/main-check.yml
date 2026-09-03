@@ -9,7 +9,7 @@
 #                         assert the agent-CLI purge still holds and /app is
 #                         under the size ceiling. This is the gate;
 #   3. publish-recipes  — ONLY on a push to main that changed image-affecting
-#                         files AND a green guard: call docker-publish with
+#                         files AND a green guard: dispatch docker-publish with
 #                         `version: all` (re-publish every GHCR tag at/above
 #                         the supported floor with the new recipe, relabel
 #                         `latest`).
@@ -30,13 +30,14 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# The call into the reusable docker-publish caps at THIS workflow's
-# permissions, so packages: write + actions: read are required for the callee
-# (which tags GHCR); contents: write is needed for the docs auto-commit.
+# contents: write is needed for the docs auto-commit; actions: read is the
+# minimum the runner requires. The recipe-driven re-publish is DISPATCHED
+# rather than called via a reusable `uses:` (see the NOTE on publish-recipes),
+# so this workflow needs no packages scope; the dispatch job raises its own
+# scope to actions: write.
 permissions:
   contents: write
   actions: read
-  packages: write
 
 jobs:
   # Which parts of this run are relevant, based on the files the event touched.
@@ -221,14 +222,28 @@ jobs:
   # 3) Recipe-change publish: a merged push to main that touched image-affecting
   #    files AND passed the guard re-publishes every supported GHCR version with
   #    the new recipe. Never fires on PRs, never fires on a red/absent guard.
+  #
+  # NOTE (2026-09-03): this used to call docker-publish via `uses:` with an
+  # `if:` referencing needs.<job>.outputs. GitHub silently SKIPPED the job even
+  # though the condition was true (paths-filter reported image=true in run
+  # 33749065416) — needs* context on a job that calls a reusable workflow is
+  # unreliable (actions/runner#2495/#3087/#1661; shiv-source/thoth#61). Since
+  # guard already only runs when image changed, a green guard on a push is
+  # sufficient; the decision is now evaluated on this plain job (needs on a
+  # normal job is reliable, exactly like guard's own `if`) and docker-publish is
+  # DISPATCHED as a separate run instead of being called as a reusable workflow.
   publish-recipes:
-    needs: [paths, guard]
-    # YAML folded scalar: joins to a single GitHub expression line (no `\`
-    # continuations — those are invalid in workflow `if:` expressions).
-    if: >-
-      github.event_name == 'push'
-      && needs.paths.outputs.image == 'true'
-      && needs.guard.result == 'success'
-    uses: ./.github/workflows/docker-publish.yml
-    with:
-      version: all
+    needs: [guard]
+    if: github.event_name == 'push' && needs.guard.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write   # to dispatch docker-publish below
+    steps:
+      - name: Re-publish every supported GHCR version with the new recipe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh workflow run docker-publish.yml
+          --repo "${{ github.repository }}"
+          --ref "${{ github.ref_name }}"
+          --field version=all
