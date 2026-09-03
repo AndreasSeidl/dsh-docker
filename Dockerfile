@@ -279,23 +279,31 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 
 # SSH for git-over-ssh. The harness is headless and $HOME/.ssh is not
-# persisted (the container rootfs is read-only), so point the client at the
-# volume-backed $DSH_HOME/.ssh that the entrypoint seeds: identity files and
-# known_hosts live there with everything else the harness owns — no extra
-# volume. `accept-new` lets the first clone of a new host (e.g. github.com)
-# succeed instead of failing at the host-key prompt an unattended agent cannot
-# answer; the key is then stored in the PERSISTED known_hosts and `ssh -T
-# git@github.com` stays green. Drop an unencrypted deploy key (e.g.
-# id_ed25519, chmod 600) into $DSH_HOME/.ssh and `git clone
-# git@github.com:...` works with no further config.
+# persisted (the container rootfs is read-only), so the client is pointed at
+# the volume-backed $DSH_HOME/.ssh instead — the same place everything else
+# the harness owns lives, no extra volume. Everything ssh needs to know lives
+# in a NORMAL user config there, replicating ~/.ssh/config + ~/.ssh/* keys but
+# persisted:
+#   * this system drop-in only INCLUDES $DSH_HOME/.ssh/config
+#     (/home/dsh/.dsh/.ssh/config), which the entrypoint seeds from
+#     container/defaults/ssh-config on first boot (idempotent, 0600);
+#   * that config is a regular editable ssh_config (per-host blocks, key
+#     paths, ports, …). No identity files are hard-coded by default — the
+#     operator adds their own IdentityFile lines pointing at keys in the SAME
+#     persisted directory when they drop one in. UserKnownHostsFile and
+#     StrictHostKeyChecking are set so host keys persist and first contact is
+#     accepted unattended. `accept-new` lets the first clone of a new host
+#     (e.g. github.com) succeed instead of failing at a host-key prompt an
+#     unattended agent cannot answer; the key is then stored in the PERSISTED
+#     known_hosts and `ssh -T git@github.com` stays green.
+# Drop an unencrypted deploy key (e.g. id_ed25519, chmod 600) into
+# $DSH_HOME/.ssh and `git clone git@github.com:...` works with no further
+# config.
 RUN mkdir -p /etc/ssh/ssh_config.d \
  && printf '%s\n' \
-      '# dsh-container: persist SSH identity + host keys under $DSH_HOME/.ssh' \
-      'IdentityFile /home/dsh/.dsh/.ssh/id_rsa' \
-      'IdentityFile /home/dsh/.dsh/.ssh/id_ecdsa' \
-      'IdentityFile /home/dsh/.dsh/.ssh/id_ed25519' \
-      'UserKnownHostsFile /home/dsh/.dsh/.ssh/known_hosts' \
-      'StrictHostKeyChecking accept-new' \
+      '# dsh-container: include the PERSISTED user ssh config (seeded by the' \
+      '# entrypoint into $DSH_HOME/.ssh/config from container/defaults/ssh-config)' \
+      'Include /home/dsh/.dsh/.ssh/config' \
       > /etc/ssh/ssh_config.d/99-dsh-container.conf
 
 # pnpm stays available so `dsh plugin --profile <name> add <pkg>` works inside

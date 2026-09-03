@@ -1,0 +1,27 @@
+# dsh-container: persisted SSH config.
+#
+# This is the ssh(1) user config for the container, seeded into
+# /home/dsh/.dsh/.ssh/config on the dsh-home volume (idempotent: only created
+# when it does not exist yet, never overwrites your edits). It is INCLUDED by
+# the system config (/etc/ssh/ssh_config.d/99-dsh-container.conf), so it
+# behaves exactly like a normal ~/.ssh/config but survives container
+# recreation.
+#
+# Edit it freely (per-host blocks, ports, proxies, ...). No identity files are
+# hard-coded: the client only offers keys explicitly referenced here (or
+# loaded into an ssh-agent). Add your own IdentityFile lines pointing at keys
+# in THIS directory — /home/dsh/.dsh/.ssh — which is also on the volume, so
+# they persist, e.g.:
+#     Host github.com
+#         IdentityFile /home/dsh/.dsh/.ssh/id_ed25519
+# (and chmod 600 the key file). Then `git clone git@github.com:...` just
+# works.
+
+Host *
+    # Host keys persist on the volume too, so a host you once trusted stays
+    # trusted across restarts (accept-new below records it on first contact).
+    UserKnownHostsFile /home/dsh/.dsh/.ssh/known_hosts
+    # An unattended agent cannot answer a host-key prompt; accept new host
+    # keys on first contact and record them in the persisted known_hosts.
+    # Change to `ask` once your hosts are recorded for a strict prompt.
+    StrictHostKeyChecking accept-new

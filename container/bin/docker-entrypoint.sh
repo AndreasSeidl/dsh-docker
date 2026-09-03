@@ -279,13 +279,23 @@ if [ -d "$DSH_HOME" ] && [ -w "$DSH_HOME" ]; then
   # fast and persistent; make sure it exists and is writable.
   mkdir -p "$DSH_HOME/.pnpm-store"
   # SSH credentials persist on the SAME volume as everything else the harness
-  # owns: the baked /etc/ssh/ssh_config.d/99-dsh-container.conf points the
-  # client at identity files and known_hosts here, and this seeds the
-  # directory (idempotent, 0700 — never touches what is already there). Drop
-  # an unencrypted deploy key (e.g. id_ed25519, chmod 600) into
+  # owns. The system /etc/ssh/ssh_config.d/99-dsh-container.conf includes the
+  # user config here, so this seeds (idempotent — never touches what is
+  # already there):
+  #   * .ssh/       0700 — the client's IdentityFile/known_hosts point here,
+  #                        so keys dropped in this directory persist;
+  #   * .ssh/config 0600 — the actual ssh_config, seeded once from the baked
+  #                        default (/opt/dsh/defaults/ssh-config). Edit it
+  #                        freely: per-host blocks, key paths, ports, proxy….
+  # Drop an unencrypted deploy key (e.g. id_ed25519, chmod 600) into
   # "$DSH_HOME/.ssh/" and `git clone git@github.com:...` works from the agent.
   mkdir -p "$DSH_HOME/.ssh"
   chmod 700 "$DSH_HOME/.ssh"
+  if [ ! -e "$DSH_HOME/.ssh/config" ] && [ -f "/opt/dsh/defaults/ssh-config" ]; then
+    cp "/opt/dsh/defaults/ssh-config" "$DSH_HOME/.ssh/config"
+    chmod 600 "$DSH_HOME/.ssh/config"
+    echo "dsh: seeded default ssh config ($DSH_HOME/.ssh/config) — edit it or drop SSH keys into $DSH_HOME/.ssh/" >&2
+  fi
 fi
 
 # ── Operator-extensible executables ─────────────────────────────────────────
