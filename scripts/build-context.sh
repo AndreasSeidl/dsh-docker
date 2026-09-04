@@ -49,8 +49,9 @@ TAR_EXCLUDES=(--exclude='./.git' \
               --exclude='./*.tsbuildinfo')
 
 fingerprint() {
-  local dflt
+  local dflt pkgs
   dflt="$(find "$REPO_ROOT/container/defaults" -type f -print 2>/dev/null | sort)"
+  pkgs="$(find "$REPO_ROOT/container/plugins" -type f -print 2>/dev/null | sort)"
   (
     set -e
     cd "$DSH_SRC"
@@ -59,7 +60,7 @@ fingerprint() {
   sha256sum "$REPO_ROOT/Dockerfile" \
     "$REPO_ROOT/container/bin/docker-entrypoint.sh" \
     "$REPO_ROOT"/container/scripts/*.mjs \
-    $dflt 2>/dev/null | sha256sum -
+    $dflt $pkgs 2>/dev/null | sha256sum -
 }
 
 # Idempotence gate: reuse the already-staged context when nothing changed.
@@ -82,10 +83,20 @@ tar -C "$DSH_SRC" \
 
 # Container helper files referenced by the Dockerfile, plus the Dockerfile
 # itself (so the context builds standalone with `docker build .docker-context`).
-mkdir -p "$CONTEXT_DIR/.container/bin" "$CONTEXT_DIR/.container/scripts" "$CONTEXT_DIR/.container/defaults"
+mkdir -p "$CONTEXT_DIR/.container/bin" "$CONTEXT_DIR/.container/scripts" "$CONTEXT_DIR/.container/defaults" "$CONTEXT_DIR/.container/plugins"
 cp "$REPO_ROOT/container/bin/docker-entrypoint.sh" "$CONTEXT_DIR/.container/bin/docker-entrypoint.sh"
 cp "$REPO_ROOT"/container/scripts/*.mjs "$CONTEXT_DIR/.container/scripts/"
 cp -r "$REPO_ROOT"/container/defaults/. "$CONTEXT_DIR/.container/defaults/"
+cp -r "$REPO_ROOT"/container/plugins/. "$CONTEXT_DIR/.container/plugins/"
+
+# A tarball is the build-time source the Dockerfile extracts (and then removes,
+# so the runtime image holds only the extracted in-box copy). An empty plugins
+# dir is a build-time slip that would leave the image without the plugin at all.
+# Fail loudly instead.
+if [ -z "$(find "$CONTEXT_DIR/.container/plugins" -name '*.tgz' -print -quit)" ]; then
+  echo "error: container/plugins holds no *.tgz to bundle" >&2
+  exit 1
+fi
 cp "$REPO_ROOT/Dockerfile" "$CONTEXT_DIR/Dockerfile"
 
 # Manifest mirror for the layer-caching install: every workspace package.json

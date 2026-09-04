@@ -631,6 +631,75 @@ untouched on its own loopback-only port.
 
 ---
 
+## SSH (git over SSH)
+
+The container ships a full OpenSSH client and a **persisted** SSH setup, so an
+unattended agent can `git clone git@host:user/repo` without a human to type a
+password or accept a host key.
+
+- The SSH directory lives on the **`$DSH_HOME` volume** at
+  `/home/dsh/.dsh/.ssh` (owned by the `dsh` user) — nothing private sits on the
+  image's writable layer, so it survives container recreation.
+- On first boot the entrypoint seeds `$DSH_HOME/.ssh/config` (0600) from
+  `container/defaults/ssh-config` (idempotent, never overwrites your edits).
+  The `dsh` user's own `~/.ssh/config` is baked into the image with a single
+  `Include` of it, so it behaves exactly like a normal `~/.ssh/config` — one
+  include path, no `/etc/ssh/ssh_config.d/` duplication (the agent runs as the
+  `dsh` user, whose user config is what git/ssh read).
+- The seeded config sets `StrictHostKeyChecking accept-new` and persists
+  `known_hosts` on the volume: first contact with a new host succeeds
+  unattended and that host stays trusted across restarts.
+- No identity is hard-coded. Drop a key in (`chmod 600`), point an
+  `IdentityFile` at it in `.ssh/config`, and cloning works.
+
+**Managing SSH identities from the web** — the image bundles
+[`dsh-ssh-manager`](https://github.com/AndreasSeidl/dsh-ssh-manager), which adds
+an **SSH** card to **Settings → Plugins → Plugin configuration**. There you
+paste a host URL, user and private key, and the plugin writes the per-host
+`Host` block, the key (`0600`) and its derived public key under
+`$DSH_HOME/.ssh` for you. The plugin itself is **installed in the image**
+(baked into the harness's own `node_modules` and resolvable in-box by every
+profile, with no pnpm store or network involved); the entrypoint only tells
+the volume-backed `web` profile to load it — it seeds a fresh volume's profile
+from `container/defaults/web-profile`, or merges `dsh-ssh-manager` into an
+existing profile's manifest on its next boot (both Local and Server mode). A
+manual `dsh plugin` step is never required:
+
+```sh
+docker exec -it dsh dsh plugin --profile web add dsh-ssh-manager   # optional, e.g. other profiles
+```
+
+To remove it deliberately, `docker exec -it dsh dsh plugin --profile web remove
+dsh-ssh-manager` (which drops the bundle from the profile manifest — the
+in-image package itself stays, harmless, just no longer a layer) and delete the
+marker `/home/dsh/.dsh/.dsh-container/.ssh-manager-installed` (otherwise the
+entrypoint registers it again on the next boot).
+
+**Upgrading dsh-ssh-manager.** Because the plugin is baked into the image, an
+upgrade is a new image build, not a per-container pnpm step:
+
+1. Download the new release tarball into
+   `container/plugins/dsh-ssh-manager/` (replace the old one — keep exactly one
+   `dsh-ssh-manager-*.tgz` there) and rebuild the image (`make build`). The
+   build derives the version from the tarball itself, nothing is hand-pinned.
+2. Start a container from the new image. Every fresh volume gets the new
+   version out of the box; **existing volumes self-upgrade on their next
+   boot** — the entrypoint re-aligns the recorded version in
+   `$DSH_HOME/profiles/web/package.json` up to the image's version (logged as
+   `recording image version … → …`), so the plugin that runs is always the
+   image's, and a stray `pnpm install` in the profile can't silently pull an
+   older published copy. The managed `$DSH_HOME/.ssh/config.d/*` host
+   configuration and keys are version-independent and are kept as-is.
+
+Optionally, without rebuilding, an operator can pull a newer published copy
+into the running profile with the documented pnpm path —
+`docker exec -it dsh dsh plugin --profile web add dsh-ssh-manager@<version>` —
+which then wins over the embedded copy (profile-local nearest-wins); the
+embedded version simply remains until the next image build, and the entrypoint
+never downgrades a profile that is already ahead.
+
+---
+
 ## Reference
 
 <details>
@@ -687,9 +756,13 @@ missing.
 ```
 /home/dsh/.dsh/
 ├── profiles/            # per-profile dirs: package.json, cordis.patch.yml (YOUR patch layer, hot-reloaded)
-│   ├── node_modules/    # launcher-maintained flat plugin links (re-healed at every boot)
-│   └── web/             # the auto-initialized web profile
+│   ├── node_modules/    # launcher-maintained flat plugin links (re-healed at every boot; dsh-ssh-manager lands here from the image)
+│   └── web/             # the volume-backed web profile (dsh-ssh-manager is registered in its manifest)
 ├── .pnpm-store/         # pnpm content store for `dsh plugin add` (persists installs)
+├── .ssh/                # the SSH dir the container's client uses (see "SSH (git over SSH)")
+│   ├── config           # seeded once from container/defaults/ssh-config; edit freely
+│   └── known_hosts      # host-key trust, persisted
+├── .dsh-container/      # container-managed state (plugin provisioning marker)
 ├── settings.yaml        # seeded on first boot; model selection, UI preferences
 ├── .credentials.yaml    # provider credentials
 ├── sessions/            # conversation history
@@ -698,10 +771,14 @@ missing.
 ```
 
 On first boot the image seeds an empty `$DSH_HOME` with a scaffold
-`settings.yaml` (empty, so stock defaults apply), then auto-initializes the
-`web` profile. Existing files are never overwritten. In **server mode** an
-extra `cordis.patch.yml` — which pins the web profile to the in-app directory
-browser (see [Server mode](#server-mode)) — is seeded as well.
+`settings.yaml` (empty, so stock defaults apply), a persisted SSH setup (see
+[SSH (git over SSH)](#ssh-git-over-ssh)), and — in this image — the
+volume-backed `web` profile already **names the bundled dsh-ssh-manager**
+plugin (which itself lives in the image and resolves in-box; the entrypoint
+just seeds/registers the profile so it is loaded), then auto-initializes it.
+Existing files are never overwritten. In **server mode** an extra
+`cordis.patch.yml` — which pins the web profile to the in-app directory browser
+(see [Server mode](#server-mode)) — is seeded as well.
 
 Inside the container the `dsh` user owns `/workspace`, `/home/dsh`, and the
 install at `/app`. Everything else is reachable only through volumes you mount,
@@ -745,6 +822,16 @@ docker exec -it dsh dsh plugin --profile web add <package>
 
 Installed plugins persist on `$DSH_HOME` and appear in the web UI's plugin list
 once the profile reloads.
+
+**Bundled out of the box:** the image ships the **dsh-ssh-manager** plugin (an
+SSH identities card in Settings → Plugins, see
+[SSH (git over SSH)](#ssh-git-over-ssh)). It is **installed in the image**
+itself — baked into the harness's own `node_modules` and resolvable in-box by
+every profile, with no pnpm step — and the volume-backed `web` profile is
+seeded (fresh volume) or merged (existing deployment) to name it, so it loads
+on first boot with no manual step needed. The in-box resolution also means the
+plugin keeps working even if `profiles/web/node_modules` is empty or the
+volume's pnpm store is unavailable.
 
 Note the profile's bundle registry: the harness treats *server* plugins
 (packages that declare a `dsh.bundle` manifest field) as profile layers and

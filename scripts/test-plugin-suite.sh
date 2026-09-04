@@ -126,10 +126,18 @@ if [ "${SKIP_WEB:-0}" != "1" ]; then
   code=000
   for i in $(seq 1 60); do
     code=$(curl -s -o /dev/null -m 2 -w "%{http_code}" "http://127.0.0.1:$PORT/" || true)
-    [ "$code" = "200" ] && break
+    # The web profile session-locks: an unauthenticated GET / answers 401
+    # (that is ALIVE), exactly like the container's own HEALTHCHECK treats it.
+    # 2xx/3xx/401 all mean the web stack is up and healthy.
+    case "$code" in
+      2*|301|302|303|307|401) break ;;
+    esac
     sleep 1
   done
-  [ "$code" = "200" ] && ok "web GUI responds 200 with the plugin installed" || bad "web GUI responds 200 with the plugin installed (got $code)"
+  case "$code" in
+    2*|301|302|303|307|401) ok "web GUI responds healthy ($code) with the plugin installed" ;;
+    *) bad "web GUI responds healthy with the plugin installed (got $code)" ;;
+  esac
   docker logs dsh-tp-web > "bench/tp-web.log" 2>&1 || true
   grep -q "sentinel mounted" "bench/tp-web.log" && ok "web log contains '[dsh-test-bundle] sentinel mounted'" || bad "web log contains '[dsh-test-bundle] sentinel mounted'"
   docker run --rm -v "$VOL:/home/dsh/.dsh" --entrypoint sh "$IMAGE" -lc \

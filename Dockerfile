@@ -284,9 +284,12 @@ RUN apt-get update \
 # the harness owns lives, no extra volume. Everything ssh needs to know lives
 # in a NORMAL user config there, replicating ~/.ssh/config + ~/.ssh/* keys but
 # persisted:
-#   * this system drop-in only INCLUDES $DSH_HOME/.ssh/config
-#     (/home/dsh/.dsh/.ssh/config), which the entrypoint seeds from
-#     container/defaults/ssh-config on first boot (idempotent, 0600);
+#   * the dsh user's own ~/.ssh/config (baked below) INCLUDES
+#     $DSH_HOME/.ssh/config, which the entrypoint seeds from
+#     container/defaults/ssh-config on first boot (idempotent, 0600) — ONE
+#     include path, no system-wide drop-in (the agent runs as the dsh user, so
+#     the user config is what git/ssh see; there is nothing to duplicate in
+#     /etc/ssh/ssh_config.d/);
 #   * that config is a regular editable ssh_config (per-host blocks, key
 #     paths, ports, …). No identity files are hard-coded by default — the
 #     operator adds their own IdentityFile lines pointing at keys in the SAME
@@ -299,12 +302,16 @@ RUN apt-get update \
 # Drop an unencrypted deploy key (e.g. id_ed25519, chmod 600) into
 # $DSH_HOME/.ssh and `git clone git@github.com:...` works with no further
 # config.
-RUN mkdir -p /etc/ssh/ssh_config.d \
- && printf '%s\n' \
-      '# dsh-container: include the PERSISTED user ssh config (seeded by the' \
-      '# entrypoint into $DSH_HOME/.ssh/config from container/defaults/ssh-config)' \
-      'Include /home/dsh/.dsh/.ssh/config' \
-      > /etc/ssh/ssh_config.d/99-dsh-container.conf
+
+# The dsh-ssh-manager plugin tarball (container/plugins/). BUILD-TIME-ONLY:
+# the run below extracts it into /app/node_modules and then DELETES
+# /opt/dsh/plugins, so the final image holds exactly ONE copy of the plugin —
+# the extracted in-box package (resolvable by every profile, no pnpm at boot).
+# Nothing in the running image references the tarball, so an upgrade is
+# literally "replace this one file + rebuild" with no stale copy to keep in
+# sync. The build context's guard (build-context.sh) fails loudly if it is
+# missing, because without it there is no plugin to bake.
+COPY --chown=root:root .container/plugins /opt/dsh/plugins
 
 # pnpm stays available so `dsh plugin --profile <name> add <pkg>` works inside
 # the container (the profile lives on the volume). Installed via npm rather
@@ -362,6 +369,31 @@ RUN find /opt/dsh/defaults -type f -exec chmod 0644 {} + \
 # absolute /build paths. Re-running the heal at /app rewrites every workspace
 # dependency link to its final in-image location.
 RUN node /usr/local/lib/dsh-container/heal-workspace-links.mjs /app
+
+# INSTALL dsh-ssh-manager INTO THE IMAGE. Instead of making the entrypoint run
+# a pnpm install into the volume at first boot, the package is extracted into
+# /app/node_modules so it resolves as an IN-BOX package for every profile, and
+# declared in the CLI install anchor (@deepseek-ai/dsh — the manifest every
+# bundle lookup and the boot-time profiles/node_modules heal is anchored to).
+# The heal then links it like any @deepseek-ai/* bundle, so a profile that
+# names it in `dsh.profile.bundles` mounts it straight from the image — no
+# pnpm, no store, no network, at build or boot. (The web profile's seed at
+# /opt/dsh/defaults/web-profile/package.json does the naming; the entrypoint
+# only copies/merges that seed into the volume and re-aligns the recorded
+# version to this baked one on every boot.) The build-time tarball is deleted
+# at the end of this step, so /app/node_modules/dsh-ssh-manager is the ONLY
+# copy of the plugin in the final image — no duplicate to drift stale.
+# UPGRADING: replace the vendored tarball (container/plugins/dsh-ssh-manager/)
+# with the new version and rebuild — the command below globs it and derives
+# the version from the package itself, so nothing here is hand-pinned. Keep
+# exactly ONE version of the tarball in that directory.
+RUN mkdir -p /app/node_modules/dsh-ssh-manager \
+ && tar -C /app/node_modules/dsh-ssh-manager -xzf \
+      $(ls /opt/dsh/plugins/dsh-ssh-manager/dsh-ssh-manager-*.tgz | sort | head -1) --strip-components=1 \
+ && chown -R dsh:dsh /app/node_modules/dsh-ssh-manager \
+ && chmod -R a+rX /app/node_modules/dsh-ssh-manager \
+ && node -e "const fs=require('fs');const pkg=JSON.parse(fs.readFileSync('/app/node_modules/dsh-ssh-manager/package.json','utf8'));const p='/app/apps/cli/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));j.dependencies=j.dependencies||{};j.dependencies['dsh-ssh-manager']=pkg.version;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')" \
+ && rm -rf /opt/dsh/plugins
 
 # Inject the crypto.randomUUID polyfill into the built web entry. randomUUID
 # is only defined in BROWSER SECURE CONTEXTS (https or localhost), so a plain
@@ -459,6 +491,23 @@ RUN mkdir -p "$DSH_HOME" /home/dsh/.dsh/.pnpm-store \
       'update-notifier: false' \
       > /home/dsh/.config/pnpm/config.yaml \
  && chown -R dsh:dsh /home/dsh
+
+# The dsh user's OWN ~/.ssh/config — the SINGLE place ssh learns about the
+# PERSISTED dsh SSH dir. It carries one `Include` of $DSH_HOME/.ssh/config
+# (the file the entrypoint seeds from container/defaults/ssh-config). The
+# dsh-ssh-manager plugin also checks for exactly this Include line, and since
+# the runtime rootfs is read-only the entrypoint could never seed this file —
+# so it is baked here. (There is no /etc/ssh/ssh_config.d/ drop-in duplicating
+# this: the agent runs as the dsh user, whose user config is what git/ssh
+# actually read. Keep this line in sync with $DSH_HOME.)
+RUN mkdir -p /home/dsh/.ssh \
+ && printf '%s\n' \
+      '# dsh-container: route the ssh client at the PERSISTED dsh SSH dir.' \
+      '# (The dsh-ssh-manager plugin checks for this exact Include line.)' \
+      'Include /home/dsh/.dsh/.ssh/config' \
+      > /home/dsh/.ssh/config \
+ && chmod 600 /home/dsh/.ssh/config \
+ && chown dsh:dsh /home/dsh/.ssh /home/dsh/.ssh/config
 
 # 3080 — the port upstream documents — is the bundled reverse proxy, and the
 # port to publish (`docker run -p 3080:3080`). `dsh web` itself sits behind it

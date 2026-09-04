@@ -2,10 +2,12 @@
 #
 # This is the ssh(1) user config for the container, seeded into
 # /home/dsh/.dsh/.ssh/config on the dsh-home volume (idempotent: only created
-# when it does not exist yet, never overwrites your edits). It is INCLUDED by
-# the system config (/etc/ssh/ssh_config.d/99-dsh-container.conf), so it
-# behaves exactly like a normal ~/.ssh/config but survives container
-# recreation.
+# when it does not exist yet, never overwrites your edits). The dsh user's own
+# ~/.ssh/config (baked into the image) INCLUDES this file, so it behaves
+# exactly like a normal ~/.ssh/config but survives container recreation. It is
+# the single include path — there is no /etc/ssh/ssh_config.d/ drop-in
+# duplicating it, because the agent runs as the dsh user whose user config is
+# what git/ssh read.
 #
 # Edit it freely (per-host blocks, ports, proxies, ...). No identity files are
 # hard-coded: the client only offers keys explicitly referenced here (or
