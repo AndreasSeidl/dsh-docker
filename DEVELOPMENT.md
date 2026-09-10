@@ -215,8 +215,8 @@ Trade-offs, all tested: `pnpm prune --prod` and incremental `--prod` installs ar
 faster but leave dev packages in a pnpm workspace's shared `.pnpm` store and break
 member links, so the Dockerfile keeps the (correct) offline reinstall; the
 cross-filesystem cache mount costs ~10 MB of compressed image size (+3%) versus no
-mount. CI publishes/consumes `type=gha` + registry build caches, so Actions builds
-start warm after the first run.
+mount. CI publishes/consumes a registry build cache, so Actions builds start
+warm after the first run.
 
 **On CI the publish cache is the per-version registry buildcache.** The
 `docker-publish` build writes `type=registry, mode=max` under
@@ -226,12 +226,13 @@ buildcache (`buildcache-<latest>-<arch>`) for the shared base — the base
 (debian+node+apt) layers are blob-identical across versions and GHCR stores a
 given blob once, so that extra read costs ~no additional storage, and a
 brand-new version still warms its base up instead of starting cold. The GitHub
-Actions cache (`type=gha`) is only READ, never written: BuildKit's gha cache
-EXPORT has been observed to hang indefinitely on large layer uploads here (a
-fully-cached `all` run stuck >1 h exporting a layer that the registry store
-wrote in ~2 s — buildx v0.36.1 / BuildKit v0.32.2), and every benefit gha could
-add is already covered by the registry refs. gha keeps harvesting the old
-entries until GitHub evicts them (LRU / 7-day stale), then becomes a no-op.
+Actions cache (`type=gha`) is not used at all: BuildKit's gha cache EXPORT has
+been observed to hang indefinitely on large layer uploads here (a fully-cached
+`all` run stuck >1 h exporting a layer that the registry store wrote in ~2 s —
+buildx v0.36.1 / BuildKit v0.32.2), so writes were dropped first; the reads went
+with them, because an unwritten scope can only ever serve entries staler than
+the registry refs while its `cache-from` kept refreshing their 7-day
+last-access clock and pinning ~2.7 GB of Actions cache quota indefinitely.
 The registry buildcache has **no automatic eviction**, so the workflow's
 `prune-buildcache` job deletes any buildcache version whose version is below
 the supported floor on every publish — the cache is bounded by the set of
@@ -260,6 +261,5 @@ experiments reached ~100 GB back-to-back. Two things keep it manageable:
   cross-commit builds always start from a clean compile.
 
 On CI the same effect is handled by the workflow (see the "On CI" section
-above and CONTRIBUTING.md): the gha cache is read-only (GitHub caps and evicts
-it automatically) and the registry buildcache — the actual cross-run store now —
-is bounded by the `prune-buildcache` job.
+above and CONTRIBUTING.md): the registry buildcache is the only cross-run store,
+and it is bounded by the `prune-buildcache` job.

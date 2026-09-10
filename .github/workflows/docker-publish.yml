@@ -184,8 +184,10 @@ jobs:
           outputs: type=image,name=${{ steps.image.outputs.image }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
           # Read existing registry caches, but stage writes locally. Cache tags
           # are published only after the full test matrix passes (publish-cache).
+          # Registry-only: the gha backend is neither written (its export hangs
+          # on this repo's layer sizes) nor read (an unwritten scope can only
+          # ever serve entries staler than the registry buildcache below).
           cache-from: |
-            type=gha,scope=dsh-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
           cache-to: type=local,mode=max,dest=${{ runner.temp }}/buildcache

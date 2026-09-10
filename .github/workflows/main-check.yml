@@ -182,17 +182,16 @@ jobs:
           push: false
           load: true
           tags: dsh-main-check:check
-          # Read-only caches. gha (independent scope from the publish lanes)
-          # harvests old entries until GitHub evicts them (LRU / 7-day stale);
-          # the NEWEST version's registry buildcache from the last publish
-          # warms the base + install/compile layers, so a guard re-check of an
-          # already-published version replays instead of recompiling. Nothing
-          # is WRITTEN: gha cache export has proven to hang on this repo (see
-          # the docker-publish build job), and a PR gate is the last place to
-          # risk that. When the newest version is unknown (master fallback) the
-          # registry ref resolves to '' and is dropped; only gha is read.
+          # One read-only cache: the NEWEST version's registry buildcache from
+          # the last publish, which warms the base + install/compile layers so a
+          # guard re-check of an already-published version replays instead of
+          # recompiling. Nothing is WRITTEN: gha cache export has proven to hang
+          # on this repo (see the docker-publish build job), and a PR gate is the
+          # last place to risk that. The gha backend is not read either — nothing
+          # has written it since, so it can only serve entries staler than the
+          # registry buildcache. When the newest version is unknown (master
+          # fallback) the ref resolves to '' and the build runs uncached.
           cache-from: |
-            type=gha,scope=dsh-guard-amd64
             ${{ steps.upstream.outputs.version && format('type=registry,ref={0}:buildcache-{1}-amd64', steps.image.outputs.image, steps.upstream.outputs.version) || '' }}
           provenance: false
           sbom: false

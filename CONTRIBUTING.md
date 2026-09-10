@@ -164,8 +164,9 @@ harness release versions are resolved from exact `dsh-v<version>` upstream tags.
 > (`docker context create builders` + `endpoint:`) is not needed on the runners
 > this repo uses.
 
-CI reads the **registry buildcache** (`<image>:buildcache-<version>-<arch>`)
-plus any remaining legacy `gha` cache entries. Each build exports its new
+CI reads the **registry buildcache** (`<image>:buildcache-<version>-<arch>`),
+and nothing else — the `type=gha` backend is neither written nor read. Each
+build exports its new
 `mode=max` cache to a **local OCI layout**, archives it, and uploads it as a
 one-day Actions artifact. Only after **every test on both architectures**
 passes does `publish-cache` copy those exact cache manifests and blobs to
