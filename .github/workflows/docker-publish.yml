@@ -200,17 +200,12 @@ jobs:
           # replay of an already-built version) and the NEWEST version's, whose
           # base (debian+node+apt) layers are blob-identical across versions and
           # stored once by GHCR — so a brand-new version still warms its base.
+          # NB: every line inside the block below is passed through as a VALUE —
+          # `#` is not a comment there, and a stray one reaches buildx as
+          # `--cache-from #` (seen in run 34466305982). Keep notes up here.
           cache-from: |
             type=registry,ref=${{ steps.image.outputs.cache }}:${{ matrix.version }}-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.cache }}:${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
-            # TRANSITIONAL: the pre-split cache tags in the release package.
-            # scripts/migrate-buildcache.sh already copied all of them into the
-            # cache package, so these are pure insurance for the first run
-            # against the new path (a missing import ref is a warning, not an
-            # error). Delete these two lines, and the old tags, once a run has
-            # come back green.
-            type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
-            type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
           cache-to: type=local,mode=max,dest=${{ runner.temp }}/buildcache
           # Disable BuildKit's default SLSA provenance/SBOM attestations: they
           # are pushed as extra index entries with no os/arch and show up as
