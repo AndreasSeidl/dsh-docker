@@ -39,9 +39,10 @@ PORT         ?= 3080
 # accounting can overshoot slightly; the in-use layer set always stays.
 KEEP_STORAGE ?= 5G
 
-# Optional registry cache ref to seed `docker build` from (the one the GitHub
-# Actions workflow pushes as <registry>/<repo>:buildcache), e.g.
-#   make build CACHE_REF=ghcr.io/acme/dsh:buildcache
+# Optional registry cache ref to seed `docker build` from (the ones the GitHub
+# Actions workflow pushes to the separate cache package,
+# <registry>/<repo>-buildcache:<version>-<arch>), e.g.
+#   make build CACHE_REF=ghcr.io/acme/dsh-buildcache:0.1.5-rc.1-amd64
 CACHE_REF    ?=
 # NB: the cache flag holds a comma, so it must be built through a variable —
 # an inline `$(if ...)` splits on that comma and leaks `ref=`.

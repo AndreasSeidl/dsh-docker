@@ -164,13 +164,22 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Compute image name
+      - name: Compute image and cache names
         id: image
         run: |
           # GHCR refs must be all-lowercase; github.repository keeps the owner's
           # case (e.g. AndreasSeidl/dsh-docker -> andreasseidl/dsh-docker), so
           # derive it via bash's @L lowercase expansion.
           echo "image=ghcr.io/${GITHUB_REPOSITORY@L}" | tee -a "$GITHUB_OUTPUT"
+          # The buildcache lives in a SEPARATE package. GHCR lists every tag in
+          # a repository path on the package page with no way to hide one, so
+          # cache tags used to show up among the real releases. That package is
+          # deliberately NOT linked to this repo (cache manifests carry no
+          # org.opencontainers.image.source label) and is public so the
+          # main-check guard can read it anonymously; pushes rely on the
+          # package's own "Manage Actions access" grant for this repo on top of
+          # the packages: write scope below.
+          echo "cache=ghcr.io/${GITHUB_REPOSITORY@L}-buildcache" | tee -a "$GITHUB_OUTPUT"
 
       - name: Build and push by digest (linux/${{ matrix.arch }})
         id: build
@@ -187,7 +196,19 @@ jobs:
           # Registry-only: the gha backend is neither written (its export hangs
           # on this repo's layer sizes) nor read (an unwritten scope can only
           # ever serve entries staler than the registry buildcache below).
+          # Two refs into the cache package: this version's own cache (full
+          # replay of an already-built version) and the NEWEST version's, whose
+          # base (debian+node+apt) layers are blob-identical across versions and
+          # stored once by GHCR — so a brand-new version still warms its base.
           cache-from: |
+            type=registry,ref=${{ steps.image.outputs.cache }}:${{ matrix.version }}-${{ matrix.arch }}
+            type=registry,ref=${{ steps.image.outputs.cache }}:${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
+            # TRANSITIONAL: the pre-split cache tags in the release package.
+            # scripts/migrate-buildcache.sh already copied all of them into the
+            # cache package, so these are pure insurance for the first run
+            # against the new path (a missing import ref is a warning, not an
+            # error). Delete these two lines, and the old tags, once a run has
+            # come back green.
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
           cache-to: type=local,mode=max,dest=${{ runner.temp }}/buildcache
@@ -343,7 +364,7 @@ jobs:
           CACHE="${{ runner.temp }}/buildcache"
           mkdir -p "$CACHE"
           tar -C "$CACHE" -xf "${{ runner.temp }}/staged-cache/buildcache.tar"
-          ./scripts/publish-buildcache.sh "$CACHE" "ghcr.io/${GITHUB_REPOSITORY@L}:buildcache-$VERSION-$ARCH"
+          ./scripts/publish-buildcache.sh "$CACHE" "ghcr.io/${GITHUB_REPOSITORY@L}-buildcache:$VERSION-$ARCH"
 
   merge:
     name: merge multi-arch manifests (verify)
@@ -457,38 +478,61 @@ jobs:
           echo "  $IMG:latest remains the newest release ($LATEST)"
           echo "  (owners kept as untagged digests)"
 
-  # Keep the registry buildcache bounded. Unlike the gha cache, GHCR buildcache
-  # storage has NO automatic eviction — each build pushes ~2-3 GB of builder
-  # layers per (version × arch) and it only ever grows. This job deletes every
-  # buildcache GHCR "version" whose tags are exclusively `buildcache-*` for a
-  # version BELOW the supported floor: once a version drops off the floor it can
-  # never be built again, so its builder cache is pure dead weight.
-  # It deliberately never touches the published <version>/latest tags and never
-  # touches UNTAGGED versions — the per-arch owner digests are untagged and
-  # deleting one would break a published tag (see the file header). Consequence:
-  # a superseded buildcache digest whose tag moved is left as an untagged
-  # remnant; that only happens on a republish of the same (version × arch)
-  # (rare), so it stays bounded in practice.
-  # Runs only after successful tests; failed tests never mutate cache tags.
-  # It only operates below the
-  # floor, which the current run never rebuilds. continue-on-error keeps it
-  # non-fatal — if the token lacks delete:packages the publish is never blocked;
+  # Keep the buildcache package bounded. GHCR has NO automatic eviction and each
+  # build pushes ~1.4 GB of builder layers per (version × arch), so the cache
+  # only ever grows. Two rules, and between them they leave exactly the caches a
+  # future build can actually use:
+  #
+  #   UNTAGGED        -> delete. `cache-from` can only address a cache BY TAG,
+  #                     so an untagged cache manifest is unreachable, not merely
+  #                     stale. The only way one gets here is publish-cache
+  #                     pushing <version>-<arch> again after a recipe change:
+  #                     the tag moves to the new manifest and the superseded one
+  #                     is left behind. Untagged and superseded are the same set.
+  #   TAGGED, < floor -> delete. Once a version drops below .supported-version it
+  #                     can never be built again, so its cache is dead weight.
+  #   TAGGED, >= floor-> keep. The one current cache per supported version ×
+  #                     arch — a recipe change re-publishes EVERY supported
+  #                     version, and each of those builds wants its own cache
+  #                     warm. Steady state is 2 × |supported versions|.
+  #
+  # This is safe only because the cache lives in its own package. In the release
+  # package, untagged is ambiguous: the per-arch owner digests are pushed by
+  # digest with no tag and are referenced by the published multi-arch indexes, so
+  # version-deleting one un-pulls a release tag (this happened to 0.1.2-alpha.2 /
+  # `latest`; see the file header). The cache package contains no indexes and
+  # nothing pushed by digest — every manifest in it arrived via a tag push — so
+  # the ambiguity does not exist and the untagged rule is sound. Everything this
+  # job can reach is disposable by construction: the worst case for a bug here is
+  # a cold build, never a broken release.
+  #
+  # Runs after publish-cache (not just test) so a run cleans up the remnant it
+  # just created, rather than leaving it for the next publish. Failed tests never
+  # reach here, so they never mutate the cache. continue-on-error keeps it
+  # non-fatal — if the token cannot delete versions the publish is never blocked;
   # the fix is a PAT with delete:packages in a DSH_PAT secret.
   prune-buildcache:
-    needs: [test]
+    needs: [publish-cache]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
-      - name: Delete buildcache versions below the supported floor
+      - name: Prune superseded and unsupported buildcache versions
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           OWNER="${GITHUB_REPOSITORY%/*}"
-          PKG="${GITHUB_REPOSITORY#*/}"
+          PKG="${GITHUB_REPOSITORY#*/}-buildcache"
+          # Belt and braces: this job deletes untagged versions, which would be
+          # catastrophic against the release package. Refuse to run unless the
+          # target is unmistakably the cache package.
+          case "$PKG" in
+            *-buildcache) ;;
+            *) echo "refusing to prune '$PKG': not a buildcache package" >&2; exit 1 ;;
+          esac
           MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' .supported-version 2>/dev/null | tr -d '[:space:]' || true)"
           [ -n "$MIN_SUPPORTED" ] || { echo "skip: no .supported-version floor"; exit 0; }
           version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
@@ -504,45 +548,56 @@ jobs:
           BASE="https://api.github.com${SCOPE}/packages/container/$PKG"
 
           DELETED=0
-          PAGE=1
+          KEPT=0
+          # Versions the API refused to delete. Retrying them on the next pass
+          # would print the same warning again and inflate the kept count, so
+          # they are skipped once recorded.
+          FAILED_IDS=" "
+          # Deleting shrinks the result set, so always re-read page 1 rather than
+          # paging forward over a list that shifts under us.
           while :; do
             DATA="$(curl -fsS -H "Authorization: Bearer $GH_TOKEN" \
-                       "$BASE/versions?per_page=100&page=$PAGE" || true)"
+                       "$BASE/versions?per_page=100" || true)"
             [ -n "$DATA" ] || { echo "note: package $PKG not listable (skip prune)"; break; }
             [ "$(printf '%s' "$DATA" | jq 'length')" != "0" ] || break
-            for id in $(printf '%s' "$DATA" | jq -r '.[].id'); do
-              TAGS="$(printf '%s' "$DATA" | jq -r --argjson id "$id" \
-                '.[] | select(.id==$id) | ((.metadata.container.tags // []) | join(" "))')"
-              # Only versions whose tags are ALL buildcache-*: never published
-              # <version>/latest tags, never untagged (owner) digests.
-              ALL_BUILDCACHE=1
-              for t in $TAGS; do
-                case "$t" in buildcache-*) ;; *) ALL_BUILDCACHE=0 ;; esac
-              done
-              [ "$ALL_BUILDCACHE" = "1" ] || continue
-              [ -n "$TAGS" ] || continue
-              # Every tag here is buildcache-<version>-<arch>; parse a version
-              # out of the first one.
-              V=""
-              for t in $TAGS; do
-                t="${t#buildcache-}"
-                t="${t%-amd64}"
-                t="${t%-arm64}"
-                V="$t"
-                [ -n "$V" ] && break
-              done
-              if [ -z "$V" ]; then
-                echo "keep unparseable buildcache tag '$TAGS' (version $id)"
-              elif version_ge "$V" "$MIN_SUPPORTED"; then
-                echo "keep buildcache-$V (version $id)"
+
+            PROGRESS=0
+            # Counted fresh each pass: the previous pass's tally described a list
+            # that has since shrunk.
+            KEPT=0
+            while IFS=$'\t' read -r id tags; do
+              [ -n "$id" ] || continue
+              case "$FAILED_IDS" in
+                *" $id "*) KEPT=$((KEPT+1)); continue ;;
+              esac
+              if [ -z "$tags" ]; then
+                REASON="untagged (superseded, unreachable by cache-from)"
               else
-                echo "delete buildcache-$V (version $id)"
-                curl -fsS -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
-                     "$BASE/versions/$id" \
-                  && DELETED=$((DELETED+1)) \
-                  || echo "  WARNING: cannot delete version $id (token lacks delete:packages?)"
+                # Tags here are <version>-<arch>; strip the arch suffix.
+                V="${tags%%[[:space:]]*}"
+                V="${V%-amd64}"
+                V="${V%-arm64}"
+                if [ -z "$V" ] || version_ge "$V" "$MIN_SUPPORTED"; then
+                  echo "keep $tags (version $id)"
+                  KEPT=$((KEPT+1))
+                  continue
+                fi
+                REASON="$V below floor $MIN_SUPPORTED"
               fi
-            done
-            PAGE=$((PAGE+1))
+              echo "delete version $id — $REASON"
+              if curl -fsS -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
+                   "$BASE/versions/$id" >/dev/null; then
+                DELETED=$((DELETED+1))
+                PROGRESS=1
+              else
+                echo "  WARNING: cannot delete version $id (token lacks delete:packages?)"
+                FAILED_IDS="$FAILED_IDS$id "
+                KEPT=$((KEPT+1))
+              fi
+            done < <(printf '%s' "$DATA" | jq -r \
+                       '.[] | [(.id|tostring), ((.metadata.container.tags // []) | join(" "))] | @tsv')
+
+            # Nothing deletable on this page means the whole list is settled.
+            [ "$PROGRESS" = 1 ] || break
           done
-          echo "done: deleted $DELETED buildcache version(s) below floor $MIN_SUPPORTED"
+          echo "done: deleted $DELETED version(s), kept $KEPT, floor $MIN_SUPPORTED"

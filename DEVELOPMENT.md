@@ -98,7 +98,7 @@ This is what `scripts/compose-test.sh` does (see TESTING.md).
 | `TAG` | `dev` | tag for build/publish |
 | `INCLUDE_BUILD_TOOLS` | on (`1`) | bake the C/native toolchain (`gcc g++ make python3 pkg-config`) into the runtime so `dsh plugin add` can compile native addons; set `0` for a leaner image (plugin installs that need a compiler then fail) |
 | `INCLUDE_AGENT_CLIS` | off (`0`) | bundle the codex/claude-agent CLI binaries (~560 MB) so `subagent_codex` / `subagent_claude_code` resolve |
-| `CACHE_REF` | *(empty)* | registry cache ref to warm `docker build` from (the per-version `:buildcache-<version>-<arch>` tags the CI exports, e.g. `ghcr.io/you/dsh-docker:buildcache-0.1.2-alpha.2-amd64`) |
+| `CACHE_REF` | *(empty)* | registry cache ref to warm `docker build` from (the per-version `<version>-<arch>` tags CI exports to the separate cache package, e.g. `ghcr.io/you/dsh-docker-buildcache:0.1.2-alpha.2-amd64`) |
 | `PORT` | `3080` | host port for `make run` |
 | `KEEP_STORAGE` | `5G` | BuildKit cache ceiling kept by `make cache-prune` |
 
@@ -218,9 +218,17 @@ cross-filesystem cache mount costs ~10 MB of compressed image size (+3%) versus 
 mount. CI publishes/consumes a registry build cache, so Actions builds start
 warm after the first run.
 
-**On CI the publish cache is the per-version registry buildcache.** The
-`docker-publish` build writes `type=registry, mode=max` under
-`ghcr.io/<owner>/dsh-docker:buildcache-<version>-<arch>` and reads two refs:
+**On CI the publish cache is the per-version registry buildcache.** It lives in
+its own GHCR package, `ghcr.io/<owner>/dsh-docker-buildcache`, tagged
+`<version>-<arch>` — NOT in the release package. GHCR lists every tag in a
+repository path on the package page and offers no way to hide one, so cache tags
+used to appear among the real multi-arch releases. That package is deliberately
+**not linked** to this repo (cache manifests carry no
+`org.opencontainers.image.source` label, so nothing links it) and is **public**,
+which keeps the guard's read anonymous and the ~28 GB of cache on free public
+storage; CI pushes to it via the package's own "Manage Actions access" grant for
+this repo, on top of the workflow's `packages: write`. The `docker-publish` build
+writes `type=registry, mode=max` there and reads two refs:
 its own (full replay of an already-built version) and the NEWEST version's
 buildcache (`buildcache-<latest>-<arch>`) for the shared base — the base
 (debian+node+apt) layers are blob-identical across versions and GHCR stores a
@@ -234,10 +242,20 @@ with them, because an unwritten scope can only ever serve entries staler than
 the registry refs while its `cache-from` kept refreshing their 7-day
 last-access clock and pinning ~2.7 GB of Actions cache quota indefinitely.
 The registry buildcache has **no automatic eviction**, so the workflow's
-`prune-buildcache` job deletes any buildcache version whose version is below
-the supported floor on every publish — the cache is bounded by the set of
-supported versions, and the job is deliberately non-fatal (a missing
-`delete:packages` token never blocks a publish).
+`prune-buildcache` job runs after every successful publish and applies two
+rules: delete every **untagged** version, and delete every tagged version
+**below the supported floor**. Untagged means superseded — `cache-from` can only
+address a cache by tag, so when a recipe change makes `publish-cache` re-push
+`<version>-<arch>` the tag moves and the old manifest is left unreachable, not
+merely stale. What survives is exactly one current cache per supported version ×
+arch, so a recipe change still re-publishes every supported version warm; steady
+state is `2 × |supported versions|`. The untagged rule is safe only because the
+cache has its own package: in the release package untagged also means *per-arch
+owner digest referenced by a published index*, and deleting one un-pulls a
+release tag (it happened to 0.1.2-alpha.2 / `latest`). The job is deliberately
+non-fatal — a token that cannot delete versions never blocks a publish.
+`scripts/migrate-buildcache.sh` performed the one-time move of the pre-split
+cache tags into the new package.
 
 ## Cache hygiene (keeping the build cache bounded)
 
