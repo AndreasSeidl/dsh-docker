@@ -49,7 +49,7 @@ jobs:
       - name: Test release discovery and batch selection
         run: python3 -m unittest discover -s tests -p 'test_release_versions.py'
       - name: Check cache publication script syntax
-        run: bash -n scripts/publish-buildcache.sh scripts/migrate-buildcache.sh
+        run: bash -n scripts/publish-buildcache.sh scripts/migrate-buildcache.sh scripts/prune-orphans.sh
 
   # Which parts of this run are relevant, based on the files the event touched.
   # dorny/paths-filter diffs the trigger against the base and sets the two

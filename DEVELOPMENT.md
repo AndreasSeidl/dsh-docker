@@ -257,6 +257,29 @@ non-fatal — a token that cannot delete versions never blocks a publish.
 `scripts/migrate-buildcache.sh` performed the one-time move of the pre-split
 cache tags into the new package.
 
+**The release package is pruned by reachability.** Every publish pushes the two
+per-arch images by digest with no tag and then joins them into a tagged index, so
+a brand-new release orphans nothing — its owners are referenced by the new index,
+and the previous release keeps its own `<version>` tag. A **republish** of an
+existing version orphans three manifests: the old index loses its tag to the new
+one, and that index's two children stop being referenced. Since `version: all`
+republishes every supported version on a recipe change, one Dockerfile edit
+stranded `3 x |supported versions|` dead manifests; 181 untagged versions had
+accumulated, of which only 24 were reachable. `scripts/prune-orphans.sh` (the
+`prune-orphans` job, after `merge`) deletes the unreachable ones:
+
+    protected = {digest of every tag} u {every child those indexes reference}
+    delete    = untagged versions whose digest is not in protected
+
+A *referenced* owner must never be version-deleted — GHCR's deletion is not
+reference-aware and removes the platform manifest the index points at, which is
+what broke 0.1.2-alpha.2 / `latest`. Being untagged is not the same as being
+dead, and the script only ever deletes the latter. It refuses to run unless it
+resolved every tag (a registry read failure would otherwise produce an empty
+protected set, i.e. "delete the live owners"), keeps anything whose manifest it
+cannot read, re-verifies every tag and child between delete batches, and aborts
+on the first unreachable one.
+
 ## Cache hygiene (keeping the build cache bounded)
 
 Plain `docker build` retains its intermediate layers (BuildKit `mode=max`

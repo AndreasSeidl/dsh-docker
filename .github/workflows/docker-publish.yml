@@ -52,12 +52,23 @@
 #
 # Because the per-arch owners are pushed WITHOUT a tag, they stay **untagged**
 # versions on GHCR — searchable by digest, never shown among tagged releases —
-# so there are no throwaway tags anywhere. They still must NEVER be
+# so there are no throwaway tags anywhere. A **referenced** owner must NEVER be
 # version-deleted: GHCR's version deletion is not reference-aware and removes
 # the platform manifest the merged index points at, leaving
 # `<version>`/`latest` un-pullable (`manifest not found`, seen on
-# 0.1.2-alpha.2 / `:latest`). The untagged owner rows accumulate per release;
-# that is the intrinsic price of native multi-arch on GHCR.
+# 0.1.2-alpha.2 / `:latest`).
+#
+# That constraint is about REACHABILITY, not about being untagged, and this file
+# used to conflate the two ("owners accumulate forever; the intrinsic price of
+# native multi-arch"). A REPUBLISH of a version orphans three manifests: the old
+# index loses its `<version>` tag to the new one, and the old index's two
+# children stop being referenced by anything. Since `version: all` republishes
+# every supported version on a recipe change, one Dockerfile edit stranded
+# 3 × |supported versions| dead manifests — 181 untagged versions had piled up,
+# of which only 24 were reachable. The `prune-orphans` job below now deletes the
+# unreachable ones after every `merge`, computing
+#   protected = {digest of every tag} u {every child those indexes reference}
+# and refusing to delete anything if it cannot fully resolve that set.
 name: docker-publish
 
 on:
@@ -466,12 +477,14 @@ jobs:
           docker manifest inspect --verbose "$IMG:latest" >/dev/null \
             || { echo "FATAL: $IMG:latest unreachable" >&2; exit 1; }
 
-          # The untagged per-arch owners backing these tags are left in place
-          # forever: GHCR has no tag-removal API, and version-deleting an owner
-          # breaks the freshly published tag (see the file header).
+          # The untagged per-arch owners backing these tags stay in place: they
+          # are what the freshly published index points at, and version-deleting
+          # a referenced owner breaks the tag (see the file header). The owners
+          # this run SUPERSEDED are a different matter — nothing references them
+          # any more, and prune-orphans collects them next.
           echo "published: $VERSIONS"
           echo "  $IMG:latest remains the newest release ($LATEST)"
-          echo "  (owners kept as untagged digests)"
+          echo "  (owners kept as untagged digests; superseded ones pruned next)"
 
   # Keep the buildcache package bounded. GHCR has NO automatic eviction and each
   # build pushes ~1.4 GB of builder layers per (version × arch), so the cache
@@ -596,3 +609,43 @@ jobs:
             [ "$PROGRESS" = 1 ] || break
           done
           echo "done: deleted $DELETED version(s), kept $KEPT, floor $MIN_SUPPORTED"
+
+  # Delete untagged versions of the RELEASE package that no tag can reach.
+  # Not the same thing as "untagged": an owner digest is load-bearing while a
+  # published index references it, and dead once its index has been superseded.
+  # scripts/prune-orphans.sh computes reachability from the tags and refuses to
+  # delete anything unless it fully resolved every tag first — an empty
+  # protected set through a registry read failure would otherwise mean "delete
+  # the live owners". It re-verifies every tag and child between batches and
+  # aborts on the first unreachable one.
+  #
+  # MUST run after `merge`, never beside it: between `build` and `merge` the
+  # freshly pushed owners are legitimately unreferenced, and pruning then would
+  # delete the digests `merge` is about to join. The docker-publish concurrency
+  # group serialises runs, so no other publish can be mid-flight.
+  # continue-on-error: storage hygiene must never fail a publish.
+  prune-orphans:
+    name: prune unreachable untagged versions
+    needs: [merge]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: regclient/actions/regctl-installer@bb562fac724b7b37c17f19671df07fe34fabc376
+        with:
+          release: v0.11.6
+
+      # The release package is public, so the manifest walk would work
+      # anonymously; logging in keeps it off the unauthenticated rate limit.
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Delete unreachable untagged versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/prune-orphans.sh --execute
