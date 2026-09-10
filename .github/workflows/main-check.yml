@@ -40,6 +40,17 @@ permissions:
   actions: read
 
 jobs:
+  workflow-tests:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: Test release discovery and batch selection
+        run: python3 -m unittest discover -s tests -p 'test_release_versions.py'
+      - name: Check cache publication script syntax
+        run: bash -n scripts/publish-buildcache.sh
+
   # Which parts of this run are relevant, based on the files the event touched.
   # dorny/paths-filter diffs the trigger against the base and sets the two
   # booleans the dependent jobs branch on.
@@ -233,7 +244,7 @@ jobs:
   # normal job is reliable, exactly like guard's own `if`) and docker-publish is
   # DISPATCHED as a separate run instead of being called as a reusable workflow.
   publish-recipes:
-    needs: [guard]
+    needs: [guard, workflow-tests]
     if: github.event_name == 'push' && needs.guard.result == 'success'
     runs-on: ubuntu-latest
     permissions:

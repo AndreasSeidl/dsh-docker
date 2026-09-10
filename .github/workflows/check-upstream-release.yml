@@ -1,26 +1,6 @@
-# Auto-publish upstream releases to GHCR.
-#
-# Upstream (deepseek-ai/deepseek-harness) tags every release as `dsh-v<ver>`
-# (e.g. dsh-v0.1.2-alpha.2), always as a PRERELEASE in the current cycle, so
-# GitHub's "latest release" API returns nothing and we cannot watch a "latest
-# stable release". This workflow therefore polls directly:
-#
-#   1. every hour (17 min past, to spread load) list ALL upstream release tags
-#      `refs/tags/dsh-v*`;
-#   2. list the version tags already published on GHCR (real version rows only
-#      — `latest` and the throwaway `sha256-*` per-arch build tags are not
-#      versions);
-#   3. skip the tick while a docker-publish run is already in progress (so the
-#      newest release is only ever built once);
-#   4. otherwise, if the newest upstream tag is not yet published, dispatch the
-#      docker-publish workflow (a separate workflow_dispatch run) with that
-#      exact version — it builds both archs natively and pushes `<version>` +
-#      `latest`.
-#
-# When there is nothing new the run is ONE tiny check job (a git ls-remote +
-# a small registry query + one Actions API call, a few seconds of runner time)
-# — no build is started. Runs on the default branch; `workflow_dispatch` lets
-# you force a re-check without waiting for the hour.
+# Poll every upstream release, including older gaps left by failed publishes.
+# Supported releases are bounded by .supported-version. GHCR tags are paginated.
+# Dispatch one batch: separate dispatches would compete for publish concurrency.
 name: check-upstream-release
 
 on:
@@ -30,99 +10,38 @@ on:
 
 permissions:
   contents: read
-  # The check job queries the Actions runs API to see whether docker-publish is
-  # already building; that needs read access on workflow runs. The publish job
-  # raises its own scope to actions: write (dispatch only).
   actions: read
+
+concurrency:
+  group: check-upstream-release
+  cancel-in-progress: false
 
 jobs:
   check:
-    name: Diff upstream releases vs published versions
+    name: Diff all supported upstream releases vs published versions
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       build_needed: ${{ steps.diff.outputs.build_needed }}
-      version: ${{ steps.diff.outputs.version }}
+      versions: ${{ steps.diff.outputs.versions }}
     steps:
-      - name: Discover new upstream release not yet published
+      - uses: actions/checkout@v5
+      - name: Discover all missing supported releases
         id: diff
         env:
-          PKG: ${{ github.repository }}
-          TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          LOWER="${PKG,,}"                            # owner/name lowercase (GHCR)
-          REPO="deepseek-ai/deepseek-harness"
+          GH_TOKEN: ${{ github.token }}
+        run: python3 scripts/release-versions.py --version missing --check
 
-          echo "== upstream release tags (dsh-v*) =="
-          UP="$(git ls-remote --refs --tags "https://github.com/$REPO.git" 'refs/tags/dsh-v*' \
-                  | sed 's#.*refs/tags/dsh-v##; s/\^{}//' | sort -V | tail -1)"
-          echo "newest upstream: ${UP:-<none>}"
-
-          echo "== tags currently on GHCR =="
-          # Public package -> anonymous pull-scope token is enough, no repo token.
-          TOKEN2="$(curl -fsS --max-time 20 "https://ghcr.io/token?scope=repository:${LOWER}:pull" \
-                     | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')"
-          curl -fsS --max-time 20 -H "Authorization: Bearer $TOKEN2" \
-               "https://ghcr.io/v2/${LOWER}/tags/list?n=500" > tags.json
-
-          echo "== is docker-publish already running? =="
-          curl -fsS --max-time 20 -H "Authorization: Bearer $TOKEN" \
-               "https://api.github.com/repos/${PKG}/actions/runs?status=in_progress&per_page=100" > runs.json
-
-          # Build iff the newest upstream tag is a real version not yet on
-          # GHCR, and no docker-publish run is currently building it.
-          BUILD="$(python3 - "$UP" <<'PYEOF'
-          import json, sys
-          up = sys.argv[1]
-          if not up:
-              print("false")
-          else:
-              tags = json.load(open("tags.json")).get("tags", [])
-              # Real versions only. `latest` is an alias; `nightly` and the
-              # sha256-*/dsh-int-*/<arch> rows were throwaway tags from older
-              # pipelines (owners are pushed untagged today, so none of these
-              # appear anymore) — defensively, none of them are versions.
-              garbage = {"latest", "nightly"}
-              versions = {t for t in tags
-                          if t not in garbage
-                          and not t.startswith(("sha256-", "dsh-int-"))
-                          and not t.endswith(("-amd64", "-arm64"))}
-              try:
-                  inflight = any(r.get("name") == "docker-publish"
-                                 for r in json.load(open("runs.json")).get("workflow_runs", []))
-              except Exception:
-                  inflight = False
-              if inflight:
-                  print("false")          # a publish is running right now — revisit next tick
-              elif up in versions:
-                  print("false")
-              else:
-                  print("true")
-          PYEOF
-          )"
-          if [ "$BUILD" = "true" ]; then
-            echo "build_needed=true"  >> "$GITHUB_OUTPUT"
-            echo "version=$UP"        >> "$GITHUB_OUTPUT"
-            echo "-> building upstream release $UP"
-          else
-            echo "build_needed=false" >> "$GITHUB_OUTPUT"
-            echo "-> nothing new to publish"
-          fi
-
-  # Dispatcher (plain job, NOT a `uses:` reusable-workflow caller): needs*
-  # output plumbing on a reusable call is silently dropped by GitHub Actions
-  # (see the NOTE in main-check.yml), so the decision is read here on a normal
-  # job and the publish is triggered as a separate docker-publish run.
   publish:
-    name: Dispatch docker-publish for ${{ needs.check.outputs.version }}
+    name: Dispatch missing release batch
     needs: check
     if: needs.check.outputs.build_needed == 'true'
     runs-on: ubuntu-latest
     permissions:
       actions: write
     steps:
-      - name: Dispatch docker-publish (native multi-arch publish)
+      - name: Dispatch docker-publish once for all missing releases
         env:
           GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.check.outputs.version }}
-        run: gh workflow run docker-publish.yml --repo "${{ github.repository }}" --ref main --field version="$VERSION"
+          VERSIONS: ${{ needs.check.outputs.versions }}
+        run: gh workflow run docker-publish.yml --repo "${{ github.repository }}" --ref main --field version="$VERSIONS"

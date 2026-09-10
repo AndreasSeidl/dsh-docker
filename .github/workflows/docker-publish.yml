@@ -11,8 +11,8 @@
 #   * main-check — an image-affecting change merged to main, after the hygiene
 #     guard passes, dispatches this with `version: all` to re-publish every
 #     supported version with the new recipe;
-#   * check-upstream-release — the hourly poll dispatches this with the exact
-#     version whenever a newer upstream release appears;
+#   * check-upstream-release — the hourly poll dispatches this with all missing
+#     supported versions, including older gaps left by failed publishes;
 #   * manual dispatch on the Actions tab.
 #
 # The two automation entry points DISPATCH this via `gh workflow run` rather
@@ -28,7 +28,8 @@
 #   at/above the supported floor (.supported-version). This is how a
 #   container-layer fix (e.g. the bundled proxy) is re-published across all
 #   supported releases at once; the NEWEST of them gets the `latest` alias.
-# * a specific version -> build that upstream tag/commit.
+# * one or more space-separated versions -> build those exact upstream releases.
+# * `missing` -> build every supported upstream release absent from GHCR.
 # * empty -> resolve the NEWEST upstream release and build it (so a "rebuild
 #   latest" is always a real release, never a default branch).
 #
@@ -63,7 +64,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Upstream dsh version to build. Empty = newest upstream release. 'all' = rebuild every tag on GHCR at/above the supported floor."
+        description: "Space-separated upstream versions. Empty = newest; all = rebuild published supported versions; missing = all unpublished supported versions."
         required: false
         default: ''
 
@@ -72,10 +73,9 @@ permissions:
   packages: write
 
 concurrency:
-  # One publish at a time per ref; a newer trigger cancels the in-flight one so
-  # parallel dispatches/poll ticks cannot race the same tags on GHCR.
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Serialize GHCR writes across refs; a poll must not cancel a manual rebuild.
+  group: docker-publish
+  cancel-in-progress: false
 
 jobs:
   # Resolve the exact upstream version(s) to build ONCE (non-matrix) and hand
@@ -87,6 +87,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     outputs:
+      build_needed: ${{ steps.version.outputs.build_needed }}
       matrix: ${{ steps.version.outputs.matrix }}
       versions: ${{ steps.version.outputs.versions }}
       latest: ${{ steps.version.outputs.latest }}
@@ -97,85 +98,14 @@ jobs:
 
       - name: Resolve version(s) to build
         id: version
-        # GITHUB_TOKEN is NOT auto-exported as an env var into steps; map it
-        # explicitly so the GHCR tag-listing below can authenticate.
         env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          MIN_SUPPORTED="$(grep -m1 -E '^[0-9]' .supported-version 2>/dev/null | tr -d '[:space:]' || true)"
-          [ -n "$MIN_SUPPORTED" ] || { echo "error: .supported-version missing or unreadable" >&2; exit 1; }
-          version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
-
-          VERSIONS=()
-          if [[ "${{ inputs.version }}" =~ ^[Aa][Ll][Ll]$ ]]; then
-            # 'all': every version tag this repo has on GHCR at/above the floor.
-            # The container recipe (Dockerfile + bundled proxy + entrypoint) is
-            # the same for every version, so a fix there lands on all of them.
-            IMG_PATH="${GITHUB_REPOSITORY@L}"
-            TOKEN="$(curl -fsS -u "$GITHUB_ACTOR:$GH_TOKEN" \
-                        "https://ghcr.io/token?scope=repository:${IMG_PATH}:pull" \
-                        | sed -n 's/.*"token":"\([^"]*\)".*/\1/p' || true)"
-            [ -n "$TOKEN" ] || { echo "error: 'all' — could not get a GHCR token to list tags" >&2; exit 1; }
-            RAW="$(curl -fsS -H "Authorization: Bearer $TOKEN" \
-                        "https://ghcr.io/v2/${IMG_PATH}/tags/list" || true)"
-            [ -n "$RAW" ] || { echo "error: 'all' — could not list GHCR tags for ${IMG_PATH}" >&2; exit 1; }
-            echo "  (all) GHCR tags: $(printf '%s' "$RAW" | jq -r '.tags[]' | tr '\n' ' ')"
-            for t in $(printf '%s' "$RAW" | jq -r '.tags[]'); do
-              [ "$t" = latest ] && continue
-              case "$t" in [0-9]*) ;; *) continue ;; esac
-              version_ge "$t" "$MIN_SUPPORTED" && VERSIONS+=("$t")
-            done
-            [ "${#VERSIONS[@]}" -gt 0 ] \
-              || { echo "error: 'all' — no published tags at/above the floor $MIN_SUPPORTED" >&2; exit 1; }
-            mapfile -t VERSIONS <<< "$(printf '%s\n' "${VERSIONS[@]}" | sort -V)"
-            echo "  (all) will rebuild: $(printf '%s ' "${VERSIONS[@]}")"
-          elif [ -n "${{ inputs.version }}" ]; then
-            VERSIONS=("${{ inputs.version }}")
-          elif [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # Manual dispatch with no version: build the newest upstream
-            # release (what the poller would have picked), so there is never a
-            # "nightly" (rolling default-branch) publish.
-            V="$(git ls-remote --refs --tags \
-                   https://github.com/deepseek-ai/deepseek-harness.git \
-                   'refs/tags/dsh-v*' \
-                   | sed 's#.*refs/tags/dsh-v##; s/\^{}//' | sort -V | tail -1)"
-            echo "note: no version given - resolved newest upstream release: ${V:-<none>}"
-            VERSIONS=("$V")
-          else
-            echo "error: could not resolve an upstream version to build" >&2
-            exit 1
-          fi
-
-          # Supported-version floor (see .supported-version / CONTRIBUTING.md):
-          # refuse to publish any upstream version below it, so fixes and
-          # features never have to be backwards-compatible with older releases.
-          for v in "${VERSIONS[@]}"; do
-            [ -n "$v" ] || { echo "error: resolved an empty version" >&2; exit 1; }
-            if version_ge "$v" "$MIN_SUPPORTED"; then
-              echo "  version $v >= supported floor $MIN_SUPPORTED"
-            else
-              echo "error: refusing to publish $v (below the supported floor $MIN_SUPPORTED)" >&2
-              exit 1
-            fi
-          done
-
-          # Outputs: space-separated versions (ascending — the LAST one wins
-          # the `latest` alias), the newest version, and the fromJSON build
-          # matrix (version × arch).
-          printf 'versions=%s\n' "${VERSIONS[*]}" >> "$GITHUB_OUTPUT"
-          printf 'latest=%s\n' "${VERSIONS[-1]}" >> "$GITHUB_OUTPUT"
-          printf 'min_supported=%s\n' "$MIN_SUPPORTED" >> "$GITHUB_OUTPUT"
-          MATRIX="$(printf '%s\n' "${VERSIONS[@]}" | jq -cRn '
-            [ inputs | select(length > 0) as $v
-              | ["amd64","arm64"] as $arch | ["ubuntu-latest","ubuntu-24.04-arm"] as $run
-              | range(0;2) as $i | { version: $v, arch: $arch[$i], runner: $run[$i] } ]')"
-          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
-          echo "  matrix: $MATRIX"
+          VERSION: ${{ inputs.version }}
+        run: python3 scripts/release-versions.py --version "$VERSION"
 
   build:
     name: build (${{ matrix.version }} / ${{ matrix.arch }})
     needs: resolve
+    if: needs.resolve.outputs.build_needed == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -252,38 +182,13 @@ jobs:
           # untagged, content-addressed version (searchable by digest, never
           # shown among tagged releases). The merge job joins the raw digests.
           outputs: type=image,name=${{ steps.image.outputs.image }},push-by-digest=true,name-canonical=true,push=true,oci-mediatypes=true
-          # The registry buildcache (type=registry) is the ONE store a publish
-          # writes to — per (version × arch) tag on GHCR, mode=max. It is what
-          # a republish — e.g. the container-layer-fix `all` run, where the
-          # harness source is unchanged — REPLAYS install+compile from instead
-          # of re-running. Two refs are read:
-          #  * buildcache-<version>-<arch> — full replay of a previously built
-          #    version;
-          #  * buildcache-<latest>-<arch> (the NEWEST version's buildcache) —
-          #    the shared base (debian+node+apt) layers are blob-identical
-          #    across all versions and GHCR stores a given blob once, so a
-          #    brand-new version that has never been built still warms its base
-          #    up from here at ~no additional storage cost. (For the newest
-          #    version's own leg both refs coincide; buildx dedups.) The newest
-          #    version comes from the `resolve` job's `latest` output.
-          # The gha cache (type=gha) is only READ, never written here:
-          # BuildKit's gha cache EXPORT to GitHub's cache service hangs
-          # indefinitely on large layer uploads (observed on buildx v0.36.1 /
-          # BuildKit v0.32.2 — a fully-cached `all` run stuck >1 h on one layer
-          # while the registry export wrote the identical layers in ~2 s), and
-          # every benefit gha could add (base warmth, cross-run reuse) is
-          # already covered by the registry refs above. Reads harvest the old
-          # entries until GitHub evicts them (LRU / 7-day stale), then become
-          # no-ops. The registry cache has NO automatic eviction, so the
-          # prune-buildcache job bounds it to versions at/above the supported
-          # floor (anything below the floor is dead weight).
-          # Per-arch scopes/refs keep amd64/arm64 caches independent.
+          # Read existing registry caches, but stage writes locally. Cache tags
+          # are published only after the full test matrix passes (publish-cache).
           cache-from: |
             type=gha,scope=dsh-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
             type=registry,ref=${{ steps.image.outputs.image }}:buildcache-${{ needs.resolve.outputs.latest }}-${{ matrix.arch }}
-          cache-to: |
-            type=registry,mode=max,ref=${{ steps.image.outputs.image }}:buildcache-${{ matrix.version }}-${{ matrix.arch }}
+          cache-to: type=local,mode=max,dest=${{ runner.temp }}/buildcache
           # Disable BuildKit's default SLSA provenance/SBOM attestations: they
           # are pushed as extra index entries with no os/arch and show up as
           # "unknown/unknown" platforms in UIs and `manifest inspect` (and
@@ -316,6 +221,18 @@ jobs:
           # contend on the same artifact; the file name carries the same info.
           name: digests-${{ matrix.version }}-${{ matrix.arch }}
           path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Archive the staged build cache
+        run: tar -C "${{ runner.temp }}/buildcache" -cf "${{ runner.temp }}/buildcache.tar" .
+
+      - name: Upload staged build cache
+        uses: actions/upload-artifact@v7
+        with:
+          name: buildcache-${{ matrix.version }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/buildcache.tar
+          compression-level: 0
           if-no-files-found: error
           retention-days: 1
 
@@ -390,6 +307,42 @@ jobs:
           ./scripts/trust-proxy-test.sh
           echo "=== ALL FOUR SUITES PASSED on linux/${{ matrix.arch }} ($DSH_IMAGE) — safe to mark for publish ==="
 
+  # A failed test on EITHER architecture leaves all GHCR buildcache tags alone.
+  # Artifacts expire automatically; no registry deletion or extra token scope.
+  publish-cache:
+    name: publish cache (${{ matrix.version }} / ${{ matrix.arch }})
+    needs: [resolve, test]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v8
+        with:
+          name: buildcache-${{ matrix.version }}-${{ matrix.arch }}
+          path: ${{ runner.temp }}/staged-cache
+      - uses: regclient/actions/regctl-installer@bb562fac724b7b37c17f19671df07fe34fabc376
+        with:
+          release: v0.11.6
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Publish the tested build cache
+        env:
+          VERSION: ${{ matrix.version }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          CACHE="${{ runner.temp }}/buildcache"
+          mkdir -p "$CACHE"
+          tar -C "$CACHE" -xf "${{ runner.temp }}/staged-cache/buildcache.tar"
+          ./scripts/publish-buildcache.sh "$CACHE" "ghcr.io/${GITHUB_REPOSITORY@L}:buildcache-$VERSION-$ARCH"
+
   merge:
     name: merge multi-arch manifests (verify)
     needs:
@@ -436,7 +389,7 @@ jobs:
           version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
 
           cd /tmp/digests
-          ls -1 | sed 's/^/  digest file: /'
+          printf '  digest file: %s\n' *.digest
 
           ANNOTATIONS=(
             --annotation 'index:org.opencontainers.image.description=DeepSeek Harness (dsh web) container'
@@ -453,14 +406,14 @@ jobs:
             DARM="$(cat "${v}__arm64.digest" 2>/dev/null || true)"
             [ -n "$DAMD" ] && [ -n "$DARM" ] \
               || { echo "error: missing amd64/arm64 digests for $v" >&2; exit 1; }
-            REFS="$IMG@sha256:$DAMD $IMG@sha256:$DARM"
-            echo "merging $v:$REFS"
+            REFS=("$IMG@sha256:$DAMD" "$IMG@sha256:$DARM")
+            echo "merging $v: ${REFS[*]}"
             # Every publish is a real (versioned) release; `latest` aliases the
-            # NEWEST of the versions in this run. Neither is ever "nightly".
+            # newest selected/published version. Backfills never demote latest.
             TAGS=(-t "$IMG:$v")
             [ "$v" = "$LATEST" ] && TAGS+=(-t "$IMG:latest")
             docker buildx imagetools create \
-              "${TAGS[@]}" "${ANNOTATIONS[@]}" $REFS \
+              "${TAGS[@]}" "${ANNOTATIONS[@]}" "${REFS[@]}" \
               || { echo "merge failed for $v" >&2; exit 1; }
             echo "  published $IMG:$v$([ "$v" = "$LATEST" ] && echo ' + latest')"
 
@@ -491,7 +444,7 @@ jobs:
             fi
           done
 
-          # `latest` alias must resolve too (it aliases the newest version).
+          # `latest` also resolves when this batch only backfills older gaps.
           docker manifest inspect --verbose "$IMG:latest" >/dev/null \
             || { echo "FATAL: $IMG:latest unreachable" >&2; exit 1; }
 
@@ -499,7 +452,7 @@ jobs:
           # forever: GHCR has no tag-removal API, and version-deleting an owner
           # breaks the freshly published tag (see the file header).
           echo "published: $VERSIONS"
-          echo "  + $IMG:latest -> $LATEST"
+          echo "  $IMG:latest remains the newest release ($LATEST)"
           echo "  (owners kept as untagged digests)"
 
   # Keep the registry buildcache bounded. Unlike the gha cache, GHCR buildcache
@@ -514,11 +467,13 @@ jobs:
   # a superseded buildcache digest whose tag moved is left as an untagged
   # remnant; that only happens on a republish of the same (version × arch)
   # (rare), so it stays bounded in practice.
-  # Runs independently (in parallel with build/test): it only operates below the
+  # Runs only after successful tests; failed tests never mutate cache tags.
+  # It only operates below the
   # floor, which the current run never rebuilds. continue-on-error keeps it
   # non-fatal — if the token lacks delete:packages the publish is never blocked;
   # the fix is a PAT with delete:packages in a DSH_PAT secret.
   prune-buildcache:
+    needs: [test]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     continue-on-error: true

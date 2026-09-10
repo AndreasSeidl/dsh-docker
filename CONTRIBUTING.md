@@ -84,27 +84,26 @@ needs to move instead.
 `.github/workflows/docker-publish.yml` builds and pushes to GHCR. It is never
 triggered by a git tag — publishing happens from three entry points:
 
-- **on new upstream releases** — `.github/workflows/check-upstream-release.yml`
-  polls every hour (17 min past) for upstream `dsh-v*` release tags, compares
-  them with the versions already on GHCR, and when a newer one is not yet
-  published calls the publish workflow (via `workflow_call`) with that exact
-  version. The check is one tiny job when there is nothing new; only a
-  genuinely new upstream tag starts the multi-arch build, and while a
-  `docker-publish` run is already in progress the tick is skipped so the newest
-  release is never built twice. Upstream currently releases everything as a
-  prerelease (`dsh-v0.1.2-alpha.2`), so the poller looks at *all* `dsh-v*` tags
-  rather than GitHub's `releases/latest` (which is empty until a stable ships);
+- **on missing upstream releases** — `.github/workflows/check-upstream-release.yml`
+  polls every hour (17 min past), compares **all** upstream `dsh-v*` tags at or
+  above `.supported-version` with all pages of GHCR tags, and dispatches one
+  `docker-publish` run containing every missing version. Older gaps left by
+  failed publishes are included even when a newer release is already present.
+  An active or queued publish defers the poll; publish runs serialize their
+  GHCR writes without canceling an ongoing build. Upstream prereleases are
+  included. Batches above 128 releases are drained over subsequent polls;
 - **on image-affecting changes to main** — `.github/workflows/main-check.yml`
   runs after every push (and on PRs as a pre-merge gate): it syncs the README's
   supported-version floor, then builds the image once and asserts hygiene
   (agent-CLI purge intact, `/app` under the size ceiling). If that guard is
   green and the push touched image-affecting files (`Dockerfile`, `container/**`,
-  `scripts/build-context.sh`), it calls the publish workflow with `version: all`
+  `scripts/build-context.sh`), it dispatches the publish workflow with `version: all`
   — re-publishing every GHCR tag at/above the supported floor with the new
   recipe, exactly like a container-layer fix;
-- **manually** — `workflow_dispatch` accepts a `version` (tag or commit) input;
-  leave it empty to build the **newest upstream release**, or use `all` to
-  re-publish every supported version.
+- **manually** — `workflow_dispatch` accepts space-separated upstream release
+  versions; leave it empty for the **newest upstream release**, use `all` to
+  rebuild published supported versions, or `missing` to fill all supported
+  publication gaps. Backfilling an older release never moves `latest` backward.
 
 There is deliberately **no schedule** and no `nightly` tag: only real upstream
 releases are ever published (under `<version>`, with `:latest` aliasing the
@@ -140,10 +139,9 @@ refuses to build below the floor, a skip can never slip past this gate.
 
 
 No PAT is needed: the poller queries upstream over git and GHCR with an
-anonymous pull-scope token, and invokes the publish workflow as a reusable
-workflow (`uses: ./.github/workflows/docker-publish.yml with: version: …`),
-which carries the same GITHUB_TOKEN-backed GHCR push permissions it always
-had.
+anonymous pull-scope token, then uses `gh workflow run` with `actions: write`
+to dispatch the version batch. The dispatched workflow uses its own
+GITHUB_TOKEN-backed GHCR push permissions.
 
 `linux/amd64` and `linux/arm64` are both built and pushed **natively**: a two-job
 matrix (`ubuntu-latest` for amd64, the `ubuntu-24.04-arm` hosted ARM runner for
@@ -155,7 +153,7 @@ published multi-arch index from the raw digest references
 (`docker buildx imagetools create … ghcr.io/…@sha256:…`), tags it `<version>` +
 `latest`, then **verifies** the published tags actually resolve (both platform
 manifests reachable) and that the amd64 leg runs. Tags in the recipe repo and
-harness versions map 1:1 (`v`-prefix optional).
+harness release versions are resolved from exact `dsh-v<version>` upstream tags.
 
 > **Attribution.** The native push-by-digest + digest-artifact + merge-by-digest
 > skeleton is adapted from
@@ -166,17 +164,22 @@ harness versions map 1:1 (`v`-prefix optional).
 > (`docker context create builders` + `endpoint:`) is not needed on the runners
 > this repo uses.
 
-CI caching runs on the **registry buildcache** (`type=registry, mode=max`,
-tagged `<image>:buildcache-<version>-<arch>` on GHCR) — the one store the
-publish workflow writes to, and the reason a recipe-change `all` republish
-replays install+compile instead of recompiling. Each build also reads the
-newest version's buildcache for the shared base (blob-deduped on GHCR, so it
-costs ~nothing extra). The GitHub Actions cache (`type=gha`) is only READ —
-it harvests old entries until GitHub evicts them (LRU / 7-day stale) and is
-never written, because BuildKit's gha cache export has proven to hang on large
-layer uploads in this repo. The registry cache has no automatic eviction, so
-the `prune-buildcache` job bounds it to versions at/above the supported floor
-on every publish (see [DEVELOPMENT.md](DEVELOPMENT.md)).
+CI reads the **registry buildcache** (`<image>:buildcache-<version>-<arch>`)
+plus any remaining legacy `gha` cache entries. Each build exports its new
+`mode=max` cache to a **local OCI layout**, archives it, and uploads it as a
+one-day Actions artifact. Only after **every test on both architectures**
+passes does `publish-cache` copy those exact cache manifests and blobs to
+GHCR using regctl. Failed tests create no buildcache tags and do not overwrite
+existing ones. Cache pruning also waits for successful tests. This avoids
+registry cleanup on failure and preserves caches backing successful builds;
+it adds an artifact upload/download for each architecture. Untagged image
+owner digests still follow the existing pre-test push path described above.
+
+Run release-resolution regression tests with:
+
+```sh
+python3 -m unittest discover -s tests -p 'test_release_versions.py'
+```
 
 > **Why some published tags show an `unknown/unknown` platform.** Builds before
 > the `provenance: false` change were pushed by `docker/build-push-action` with

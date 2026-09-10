@@ -10,7 +10,8 @@
 set -uo pipefail
 
 IMAGE="${DSH_IMAGE:-dsh:dev}"
-PREFIX="dsh-smoke-$$"
+# PID namespaces can reuse $$ across invocations; each run needs fresh volumes.
+PREFIX="dsh-smoke-$$-$RANDOM-$RANDOM"
 PORT=$(( ( RANDOM % 20000 ) + 20000 ))
 FAILED=0
 
@@ -33,8 +34,8 @@ echo "  image $IMAGE → harness $HARNESS_VER (supported floor: $MIN_SUPPORTED)"
 volumes=()
 containers=()
 cleanup() {
-  for v in "${volumes[@]:-}"; do docker volume rm "$v" >/dev/null 2>&1 || true; done
   for c in "${containers[@]:-}"; do docker rm -f "$c" >/dev/null 2>&1 || true; done
+  for v in "${volumes[@]:-}"; do docker volume rm "$v" >/dev/null 2>&1 || true; done
 }
 trap cleanup EXIT
 
@@ -156,8 +157,10 @@ echo "  death by non-root user = $(docker exec "$CID" id -un 2>/dev/null)"
 echo "== harness home volume (self-modification lives here) =="
 check "profile layout was auto-initialized on the volume" \
   docker exec "$CID" test -f /home/dsh/.dsh/profiles/web/package.json
+# Probe a required host dependency: browser-only React is no longer in the
+# production dependency graph starting with upstream 0.1.5-alpha.2.
 check "profile node_modules fallback was healed at boot" \
-  docker exec "$CID" test -e /home/dsh/.dsh/profiles/node_modules/react
+  docker exec "$CID" test -e /home/dsh/.dsh/profiles/node_modules/@deepseek-ai/cordis
 own_home="$(docker exec "$CID" stat -c %U /home/dsh/.dsh)"
 check "DSH_HOME owned by dsh" test "$own_home" = "dsh"
 check "user patch layer is present (hot-reloaded overrides)" \
