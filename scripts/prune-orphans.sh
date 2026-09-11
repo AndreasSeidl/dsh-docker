@@ -190,6 +190,9 @@ N=0
 while IFS=$'\t' read -r id dig; do
   if curl -fsS -X DELETE -H "Authorization: Bearer $GH_TOKEN" \
        "$BASE/versions/$id" >/dev/null 2>&1; then
+    # Log every digest: this job deletes things, so the run log has to say
+    # exactly what went, not just how many.
+    echo "  deleted $dig (version $id)"
     OK=$((OK + 1))
   else
     echo "  WARNING: cannot delete version $id (token lacks delete:packages?)"
