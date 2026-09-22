@@ -158,9 +158,19 @@ echo "== harness home volume (self-modification lives here) =="
 check "profile layout was auto-initialized on the volume" \
   docker exec "$CID" test -f /home/dsh/.dsh/profiles/web/package.json
 # Probe a required host dependency: browser-only React is no longer in the
-# production dependency graph starting with upstream 0.1.5-alpha.2.
-check "profile node_modules fallback was healed at boot" \
-  docker exec "$CID" test -e /home/dsh/.dsh/profiles/node_modules/@deepseek-ai/cordis
+# production dependency graph starting with upstream 0.1.5-alpha.2. Upstream
+# 0.1.6-alpha.2 flipped the default profile resolution to 'runtime': the loader
+# resolves out-of-tree imports in memory over the installation closure, and the
+# shared profiles/node_modules is only healed on a profile-less home — so below
+# it the boot-healed fallback dir is the probe, above it the installation
+# closure the runtime lookup reads.
+if version_ge "$HARNESS_VER" "0.1.6-alpha.2"; then
+  check "installation closure carries the deps out-of-tree plugins resolve (0.1.6a2+ runtime lookup)" \
+    docker exec "$CID" test -e /app/node_modules/@deepseek-ai/cordis/package.json
+else
+  check "profile node_modules fallback was healed at boot" \
+    docker exec "$CID" test -e /home/dsh/.dsh/profiles/node_modules/@deepseek-ai/cordis
+fi
 own_home="$(docker exec "$CID" stat -c %U /home/dsh/.dsh)"
 check "DSH_HOME owned by dsh" test "$own_home" = "dsh"
 check "user patch layer is present (hot-reloaded overrides)" \
