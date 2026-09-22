@@ -121,11 +121,15 @@ jobs:
     timeout-minutes: 90
     env:
       # Bytes of the /app tree (du -sb /app, measured inside the image — immune
-      # to layer-import/remote-cache size reporting). Fixed image: ~455 MB; if
-      # the agent-CLI purge silently stops matching, this jumps to ~1015 MB.
-      # 650 MB is comfortable headroom for legitimate growth yet far below the
-      # failure mode. Raise it only as a deliberate, documented decision.
-      SIZE_CEILING_BYTES: '650000000'
+      # to layer-import/remote-cache size reporting). Fixed image: ~442 MB at
+      # upstream 0.1.2-rc.1, ~809 MB at 0.1.7-alpha.1 (measured by this guard on
+      # main-check #14) — the growth is the prod closure (+252 MB, mostly
+      # @deepseek-ai/libreoffice-kit-wasm at 185 MB) plus the compiled packages
+      # (+38 MB). If the agent-CLI purge silently stops matching, this jumps by
+      # ~560 MB more (~1.37 GB). 1.0 GB is headroom for ordinary releases yet
+      # far below the failure mode. Raise it only as a deliberate, documented
+      # decision.
+      SIZE_CEILING_BYTES: '1000000000'
     steps:
       - name: Checkout this repo (recipe + build scripts)
         uses: actions/checkout@v5
