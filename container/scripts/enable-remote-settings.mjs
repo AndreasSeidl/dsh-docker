@@ -38,43 +38,80 @@ if (!root) {
 // deferred), so the flag is visible to every Settings decision.
 const FLAG = 'globalThis.__DSH_ALLOW_REMOTE_SETTINGS__ === true'
 
-// Each rule: file (relative to <packages-root>) + the exact byte strings to
-// swap. Two forms per package because tsdown emits different quoting and
+// Each rule: file (relative to <packages-root>) + the known byte forms to
+// swap. Two forms per gate because tsdown emits different quoting and
 // structure in the bundled facade (lib/client.js) vs the per-module output
 // (lib/types/client/index.js); both are patched so whichever the loader serves
-// honors the flag.
+// honors the flag. Harness releases also rephrase the gate while keeping its
+// shape (0.1.7-alpha.1 renamed the store accessor settingsScope → configForms),
+// so each rule carries one form per known harness phrasing. A file must match
+// EXACTLY ONE known form: an unphrased bump matches none and aborts below.
 const RULES = [
   // The settings-mirror persistence decision (drives "settings are unavailable
   // in this browser"): `isLoopback ? "host" : "memory"` → honor the flag too.
   {
     file: 'client/ui-settings/lib/client.js',
-    search: 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";',
-    replace: `const persistence = ctx.remote.$host.isLoopback || ${FLAG} ? "host" : "memory";`,
+    forms: [
+      {
+        search: 'const persistence = ctx.remote.$host.isLoopback ? "host" : "memory";',
+        replace: `const persistence = ctx.remote.$host.isLoopback || ${FLAG} ? "host" : "memory";`,
+      },
+    ],
   },
   {
     file: 'client/ui-settings/lib/types/client/index.js',
-    search: "const persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory';",
-    replace: `const persistence = ctx.remote.$host.isLoopback || ${FLAG} ? 'host' : 'memory';`,
+    forms: [
+      {
+        search: "const persistence = ctx.remote.$host.isLoopback ? 'host' : 'memory';",
+        replace: `const persistence = ctx.remote.$host.isLoopback || ${FLAG} ? 'host' : 'memory';`,
+      },
+    ],
   },
   // The General tab's document controller (settings.yaml editing): only
-  // constructed on a loopback page; gate it on the flag too.
+  // constructed on a loopback page; gate it on the flag too. Two phrasings:
+  // 0.1.7-alpha.1+ reads the describe() seat off ctx.configForms, earlier
+  // releases off ctx.settingsScope.
   {
     file: 'client/ui-settings-general/lib/client.js',
-    search:
-      'const documentController = ctx.remote.$host.isLoopback ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe()) : void 0;',
-    replace:
-      `const documentController = ctx.remote.$host.isLoopback || ${FLAG} ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe()) : void 0;`,
+    forms: [
+      {
+        search:
+          'const documentController = ctx.remote.$host.isLoopback ? new SettingsDocumentStore(ctx, ctx.configForms.describe()) : void 0;',
+        replace:
+          `const documentController = ctx.remote.$host.isLoopback || ${FLAG} ? new SettingsDocumentStore(ctx, ctx.configForms.describe()) : void 0;`,
+      },
+      {
+        search:
+          'const documentController = ctx.remote.$host.isLoopback ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe()) : void 0;',
+        replace:
+          `const documentController = ctx.remote.$host.isLoopback || ${FLAG} ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe()) : void 0;`,
+      },
+    ],
   },
   {
     file: 'client/ui-settings-general/lib/types/client/index.js',
-    search:
-      'const documentController = ctx.remote.$host.isLoopback\n' +
-      '        ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe())\n' +
-      '        : undefined;',
-    replace:
-      `const documentController = ctx.remote.$host.isLoopback || ${FLAG}\n` +
-      '        ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe())\n' +
-      '        : undefined;',
+    forms: [
+      {
+        search:
+          'const documentController = ctx.remote.$host.isLoopback\n' +
+          '        ? new SettingsDocumentStore(ctx, ctx.configForms.describe())\n' +
+          '        : undefined;',
+        replace:
+          `const documentController = ctx.remote.$host.isLoopback || ${FLAG}\n` +
+          '        ? new SettingsDocumentStore(ctx, ctx.configForms.describe())\n' +
+          '        : undefined;',
+      },
+      {
+        search:
+          'const documentController = ctx.remote.$host.isLoopback\n' +
+          '        ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe())\n' +
+          '        : undefined;',
+        replace:
+          `const documentController = ctx.remote.$host.isLoopback || ${FLAG}\n` +
+          '        ? new SettingsDocumentStore(ctx, ctx.settingsScope.describe())\n' +
+          '        : undefined;',
+      },
+    ],
   },
 ]
 
@@ -90,12 +127,14 @@ for (const rule of RULES) {
     continue
   }
   let count = 0
-  let idx = -1
-  for (let i = source.indexOf(rule.search); i !== -1; i = source.indexOf(rule.search, i + 1)) {
-    count += 1
-    if (idx === -1) idx = i
+  let hit = null
+  for (const form of rule.forms) {
+    for (let i = source.indexOf(form.search); i !== -1; i = source.indexOf(form.search, i + 1)) {
+      count += 1
+      if (hit === null) hit = form
+    }
   }
-  if (count !== 1) {
+  if (count !== 1 || hit === null) {
     console.error(
       `enable-remote-settings: expected the gate in ${rule.file} exactly once, found ${count}. ` +
         'A harness version bump may have reformatted the bundled client — update the ' +
@@ -103,6 +142,6 @@ for (const rule of RULES) {
     )
     process.exit(1)
   }
-  writeFileSync(file, source.slice(0, idx) + rule.replace + source.slice(idx + rule.search.length))
+  writeFileSync(file, source.slice(0, source.indexOf(hit.search)) + hit.replace + source.slice(source.indexOf(hit.search) + hit.search.length))
   console.log(`enable-remote-settings: patched ${rule.file}`)
 }
