@@ -170,11 +170,18 @@ FROM install AS prod-deps
 COPY packages/subprocess/subprocess-local/ packages/subprocess/subprocess-local/
 # The root postinstall (lefthook) is dev-only and would fail a --prod install.
 RUN node -e "const fs=require('fs');const p='/build/package.json';const j=JSON.parse(fs.readFileSync(p,'utf8'));if(j.scripts&&j.scripts.postinstall)delete j.scripts.postinstall;fs.writeFileSync(p,JSON.stringify(j,null,2)+'\n')"
-# Convert the full dev tree to a production-only layout. --offline reuses the
-# store the install stage just populated (same cache mount, same build); on a
-# truly cold build the dev install has already downloaded everything. Lifecycle
-# scripts run (node-pty builds its native addon, subprocess-local runs its
-# postinstall against the copied source).
+# Convert the full dev tree to a production-only layout. Lifecycle scripts run
+# (node-pty builds its native addon, subprocess-local runs its postinstall
+# against the copied source).
+#
+# No `--offline` here on purpose: it assumed the store the install stage just
+# populated (same cache mount, same build), but BuildKit cache mounts do not
+# survive a fresh builder, and when the install stage's layer is cache-hit the
+# populate step never runs — so an offline install fails with
+# ERR_PNPM_NO_OFFLINE_TARBALL on the first package the store lacks (seen on
+# main-check #18: commander@15.0.0). Without --offline pnpm still serves from
+# the store first and only fetches what is missing; the lockfile's integrity
+# hashes keep the result identical either way.
 #
 # The `--filter` excludes the packages/test-support members: they declare
 # vitest (and the @testing-library helpers) under `dependencies` — not
@@ -190,7 +197,7 @@ RUN node -e "const fs=require('fs');const p='/build/package.json';const j=JSON.p
 # that this keeps holding.
 RUN --mount=type=cache,target=/pnpm-cache \
     rm -rf node_modules \
- && pnpm install --prod --frozen-lockfile --config.confirmModulesPurge=false --offline --filter '!./packages/test-support/**'
+ && pnpm install --prod --frozen-lockfile --config.confirmModulesPurge=false --filter '!./packages/test-support/**'
 # The two agent-CLI platform binary packages (the codex and claude-agent-sdk
 # native CLIs, ~560 MB for the pair) are omitted by default; `pnpm install
 # --prod` above ran with dev packages, so they'd otherwise survive here.
