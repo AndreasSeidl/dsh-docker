@@ -175,9 +175,22 @@ RUN node -e "const fs=require('fs');const p='/build/package.json';const j=JSON.p
 # truly cold build the dev install has already downloaded everything. Lifecycle
 # scripts run (node-pty builds its native addon, subprocess-local runs its
 # postinstall against the copied source).
+#
+# The `--filter` excludes the packages/test-support members: they declare
+# vitest (and the @testing-library helpers) under `dependencies` — not
+# devDependencies — so an unfiltered --prod install drags the whole vitest
+# closure (jsdom, esbuild, rolldown's native binding, lightningcss, happy-dom
+# and their transitive tails; ~230 MB) into the runtime image. Nothing in the
+# compiled tree or the runtime imports those members — only the harness repo's
+# own tests/fixtures do, which are never built into the image (and the test
+# toolchain packages show zero runtime references in the compiled output).
+# The filter narrows the INSTALL SCOPE only, so --frozen-lockfile still
+# validates the full lockfile against the unchanged manifests. The smoke
+# suite's "no vitest/jsdom test toolchain" check is the independent assertion
+# that this keeps holding.
 RUN --mount=type=cache,target=/pnpm-cache \
     rm -rf node_modules \
- && pnpm install --prod --frozen-lockfile --config.confirmModulesPurge=false --offline
+ && pnpm install --prod --frozen-lockfile --config.confirmModulesPurge=false --offline --filter '!./packages/test-support/**'
 # The two agent-CLI platform binary packages (the codex and claude-agent-sdk
 # native CLIs, ~560 MB for the pair) are omitted by default; `pnpm install
 # --prod` above ran with dev packages, so they'd otherwise survive here.

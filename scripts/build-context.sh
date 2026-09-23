@@ -39,19 +39,6 @@ fi
 
 # The exact exclusion set the staging tar applies. The fingerprint hashes the
 # same set so the gate reflects precisely what enters the image.
-#
-# `./packages/test-support` is excluded on purpose: its members declare vitest
-# (and the @testing-library helpers) under `dependencies` — not
-# devDependencies — so leaving the directory in would drag the whole vitest
-# closure (jsdom, esbuild, rolldown's native binding, lightningcss, happy-dom;
-# ~75 MB) into the image's prod dependency install. Nothing in the compiled
-# tree or the runtime imports those members — only the harness repo's own
-# tests/fixtures do, which are never built into the image — and the tsconfig
-# references are paths-only (inert). pnpm accepts the smaller workspace with
-# `--frozen-lockfile` (the lockfile's extra importers for absent members are
-# simply not checked). If upstream renames the directory, the smoke suite's
-# "no test-runner toolchain" check fails the build and this exclusion needs
-# updating.
 TAR_EXCLUDES=(--exclude='./.git' \
               --exclude='./.github' \
               --exclude='./.agents' \
@@ -59,7 +46,6 @@ TAR_EXCLUDES=(--exclude='./.git' \
               --exclude='./.dsh-build' \
               --exclude='./node_modules' \
               --exclude='./docs' \
-              --exclude='./packages/test-support' \
               --exclude='./*.tsbuildinfo')
 
 fingerprint() {
@@ -126,8 +112,7 @@ while IFS= read -r f; do
   mkdir -p "$(dirname "$dst")"
   cp "$f" "$dst"
 done < <(find "$DSH_SRC" -name package.json \
-          -not -path "*/node_modules/*" -not -path "*/.git/*" \
-          -not -path "*/packages/test-support/*")
+          -not -path "*/node_modules/*" -not -path "*/.git/*")
 
 printf '%s' "$new_fp" > "$STAMP"
 
