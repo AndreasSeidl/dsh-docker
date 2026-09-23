@@ -250,7 +250,18 @@ jobs:
   # DISPATCHED as a separate run instead of being called as a reusable workflow.
   publish-recipes:
     needs: [guard, workflow-tests]
-    if: github.event_name == 'push' && needs.guard.result == 'success'
+    # always() is REQUIRED here, not just belt-and-braces: the first push with
+    # a green guard under this design (main-check #19, d6b2005) had this job
+    # silently SKIPPED with needs.guard.result == 'success' and a push event —
+    # the default needs-gate plus a bare needs.<job>.result reference does not
+    # evaluate reliably on this runner (same class as actions/runner#2495).
+    # guard's own `if` uses exactly this always() + needs-condition shape and
+    # has never mis-skipped, so mirror it and make the if the sole decision.
+    if: >-
+      always() &&
+      github.event_name == 'push' &&
+      needs.guard.result == 'success' &&
+      needs.workflow-tests.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       actions: write   # to dispatch docker-publish below

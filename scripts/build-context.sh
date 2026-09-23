@@ -39,6 +39,13 @@ fi
 
 # The exact exclusion set the staging tar applies. The fingerprint hashes the
 # same set so the gate reflects precisely what enters the image.
+#
+# NOTE: the workspace stays FULL here on purpose — the member tsconfigs
+# project-reference the test-support members, so excluding that directory from
+# the tar or the manifest mirror breaks tsc -b (TS5083/TS6053 on the absent
+# members; seen on main-check #17). The test toolchain is dropped later, in the
+# Dockerfile's prod-deps stage, via `pnpm install --prod --filter
+# '!./packages/test-support/**'`.
 TAR_EXCLUDES=(--exclude='./.git' \
               --exclude='./.github' \
               --exclude='./.agents' \
