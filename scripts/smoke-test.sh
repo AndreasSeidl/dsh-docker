@@ -99,6 +99,18 @@ check "no claude-agent-sdk/codex linux platform packages in the runtime image" \
   docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
     '! find /app/node_modules/.pnpm -maxdepth 1 -type d \( -name "@anthropic-ai+claude-agent-sdk-linux-*@*" -o -name "@openai+codex@*-linux-*" -o -name "@openai+codex-linux-*@*" \) -print -quit | grep -q .'
 
+echo "== image hygiene: no test-runner toolchain (test-support excluded at staging) =="
+# The packages/test-support members declare vitest under `dependencies`, so a
+# staged tree that still carries them drags the whole vitest closure (jsdom,
+# esbuild, rolldown's binding, lightningcss, happy-dom; ~75 MB) into the prod
+# install. build-context.sh excludes the directory; this catches a rename (the
+# exclusion silently stops matching and the image quietly grows). esbuild and
+# rolldown are deliberately NOT asserted: a future harness feature may
+# legitimately ship them.
+check "no vitest/jsdom test toolchain in the runtime image" \
+  docker run --rm --entrypoint /bin/sh "$IMAGE" -c \
+    '! find /app/node_modules/.pnpm -maxdepth 1 -type d \( -name "vitest@*" -o -name "@vitest+*" -o -name "jsdom@*" -o -name "happy-dom@*" -o -name "@testing-library+*" \) -print -quit | grep -q .'
+
 echo "== CLI modes (no server) =="
 check "dsh --version prints a version" docker run --rm "$IMAGE" --version
 check "dsh web --help prints the web flag family" \
