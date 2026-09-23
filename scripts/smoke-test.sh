@@ -54,10 +54,30 @@ check() { # check <description> <command...>
   if "$@" >/dev/null 2>&1; then pass "$desc"; else fail "$desc"; fi
 }
 http_code() { curl -s -o /dev/null -w '%{http_code}' "$@"; }
-wait_ready() { # wait_ready <container>  → waits for the "dsh web: http" line
+http_code_wait() { # http_code_wait <attempts> <url...> → first non-000 code, or 000
+  # CI runners intermittently drop a freshly published docker-proxy port or a
+  # bridge connection for a few seconds (the same check passes for other
+  # containers in the same run). A refused port fails curl instantly and an
+  # accepted-then-closed proxy hop fails with "empty reply" (exit 52) — neither
+  # is what --retry-connrefused retries on, so the retry lives here.
+  local attempts="$1"; shift
+  local i code
+  for i in $(seq 1 "$attempts"); do
+    code="$(http_code "$@")"
+    [ "$code" != "000" ] && { echo "$code"; return 0; }
+    sleep 1
+  done
+  echo "$code"
+}
+wait_ready() { # wait_ready <container>  → waits for the proxy bind + the app's ready line
   local cid="$1" i
   for i in $(seq 1 90); do
-    docker logs "$cid" 2>&1 | grep -q "dsh web: http" && return 0
+    # "[dsh-proxy] serving" is the proxy's own bind announcement; "dsh web: http"
+    # is the app's ready line, printed marginally before the proxy publishes its
+    # port. Requiring both closes that window, so a port check that follows
+    # never races a proxy that is still coming up.
+    docker logs "$cid" 2>&1 | grep -q "dsh web: http" \
+      && docker logs "$cid" 2>&1 | grep -q '\[dsh-proxy\] serving' && return 0
     sleep 1
   done
   return 1
@@ -121,12 +141,17 @@ fi
 
 # The whole dance over the PUBLISHED port — the exact path a real user takes:
 check "published URL without a token is refused (401 — session-locked)" \
-  test "$(http_code --max-time 8 "http://127.0.0.1:$PORT/")" = "401"
+  test "$(http_code_wait 8 --max-time 8 "http://127.0.0.1:$PORT/")" = "401"
 CJ=$(mktemp)
+dance=""
+for _ in $(seq 1 8); do
+  if curl -fsSL -c "$CJ" -b "$CJ" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT/?token=$TOK"; then dance=ok; break; fi
+  sleep 1
+done
 check "token exchange over the published port: /?token=… → 303 + cookie, then the GUI" \
-  curl -fsSL -c "$CJ" -b "$CJ" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT/?token=$TOK"
+  test "$dance" = "ok"
 check "with the session cookie the GUI answers 200 via the published port" \
-  curl -fsS -o /dev/null -b "$CJ" --max-time 8 "http://127.0.0.1:$PORT/"
+  test "$(http_code_wait 8 --max-time 8 -b "$CJ" "http://127.0.0.1:$PORT/")" = "200"
 
 # LAN: the cookie is NOT bound to a host name or IP — the proxy always
 # presents the fixed loopback authority to the app, so a cookie exchanged (or
@@ -135,8 +160,13 @@ check "with the session cookie the GUI answers 200 via the published port" \
 # with another foreign Host (curl jar domain matching is bypassed by sending
 # the cookie by hand, so this tests the APP, not curl).
 IPCID=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID")
-SESS=$(curl -s -D - -o /dev/null --max-time 10 -H "Host: 192.168.1.50:3080" \
-  "http://$IPCID:3080/?token=$TOK" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | head -1)
+SESS=""
+for _ in $(seq 1 8); do
+  SESS=$(curl -s -D - -o /dev/null --max-time 10 -H "Host: 192.168.1.50:3080" \
+    "http://$IPCID:3080/?token=$TOK" | sed -n 's/^[Ss]et-[Cc]ookie: \([^;]*\).*/\1/p' | head -1)
+  [ -n "$SESS" ] && break
+  sleep 1
+done
 check "cookie is not host-bound: foreign Host/IP validates through the proxy (LAN)" \
   bash -c 'test -n "$1" && curl -fsS -o /dev/null --max-time 8 \
     -H "Host: laptop.lan:3080" -H "Cookie: $1" "http://$2:3080/"' _ "$SESS" "$IPCID"
@@ -162,11 +192,14 @@ check "profile layout was auto-initialized on the volume" \
 # 0.1.6-alpha.2 flipped the default profile resolution to 'runtime': the loader
 # resolves out-of-tree imports in memory over the installation closure, and the
 # shared profiles/node_modules is only healed on a profile-less home — so below
-# it the boot-healed fallback dir is the probe, above it the installation
-# closure the runtime lookup reads.
+# it the boot-healed fallback dir is the probe, above it the per-project heal
+# link under the install anchor: /app/apps/cli/node_modules/<dep> is the path
+# Node's nearest-wins resolution reads from the CLI's entrypoint (the root
+# /app/node_modules carries no workspace deps — the root package.json declares
+# none — so probing it asserts a path that never exists).
 if version_ge "$HARNESS_VER" "0.1.6-alpha.2"; then
   check "installation closure carries the deps out-of-tree plugins resolve (0.1.6a2+ runtime lookup)" \
-    docker exec "$CID" test -e /app/node_modules/@deepseek-ai/cordis/package.json
+    docker exec "$CID" test -e /app/apps/cli/node_modules/@deepseek-ai/cordis/package.json
 else
   check "profile node_modules fallback was healed at boot" \
     docker exec "$CID" test -e /home/dsh/.dsh/profiles/node_modules/@deepseek-ai/cordis
@@ -221,8 +254,8 @@ containers+=("$CID2")
 wait_ready "$CID2"
 IP2=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CID2")
 check "published port answers (401 from the app's auth gate, not a dead port)" \
-  test "$(http_code --max-time 10 "http://127.0.0.1:$PORT2/")" != "000"
-any_host=$(http_code --max-time 10 "http://$IP2:3080/")
+  test "$(http_code_wait 8 --max-time 10 "http://127.0.0.1:$PORT2/")" != "000"
+any_host=$(http_code_wait 8 --max-time 10 "http://$IP2:3080/")
 if [ "$any_host" != "000" ]; then
   pass "proxy binds every interface and forwards any Host (answered HTTP $any_host)"
 else
@@ -257,7 +290,7 @@ CIDPX=$(docker run -d -p "$PORT_PX:3080" \
   "$IMAGE")
 containers+=("$CIDPX")
 wait_ready "$CIDPX"
-px_code=$(http_code --max-time 10 --retry 5 --retry-connrefused --retry-delay 1 "http://127.0.0.1:$PORT_PX/")
+px_code=$(http_code_wait 8 --max-time 10 "http://127.0.0.1:$PORT_PX/")
 if [ "$px_code" != "000" ]; then
   pass "proxy: published port answers with no config at all (HTTP $px_code)"
 else
@@ -266,7 +299,7 @@ fi
 IPPX=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$CIDPX")
 # Any Host is forwarded — there is deliberately no Host allow-list (any client
 # can claim any Host, so one would not be a boundary; the published port is).
-any_px=$(http_code --max-time 8 "http://$IPPX:3080/")
+any_px=$(http_code_wait 8 --max-time 8 "http://$IPPX:3080/")
 if [ "$any_px" != "000" ]; then
   pass "proxy: serves any Host on the container interface (answered HTTP $any_px)"
 else
@@ -277,15 +310,23 @@ ws_code=000
 # needs the same session cookie as the HTTP API.
 CJPX=$(mktemp)
 TOKPX=$(session_token "$CIDPX")
-curl -fsSL -c "$CJPX" -b "$CJPX" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT_PX/?token=$TOKPX" >/dev/null 2>&1
+for _ in $(seq 1 8); do
+  if curl -fsSL -c "$CJPX" -b "$CJPX" -o /dev/null --max-time 15 "http://127.0.0.1:$PORT_PX/?token=$TOKPX" >/dev/null 2>&1; then break; fi
+  sleep 1
+done
 # A browser sends Origin + the session cookie on the upgrade; assert the proxy
 # relays it into a real 101 (not just any response). Go through the published
 # host port so the cookie jar (bound to 127.0.0.1) is actually sent.
-ws_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
-  -b "$CJPX" -H "Origin: http://localhost:$PORT_PX" \
-  -H "Connection: Upgrade" -H "Upgrade: websocket" \
-  -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
-  "http://127.0.0.1:$PORT_PX/api/remote.mux")
+for _ in $(seq 1 8); do
+  ws_code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    -b "$CJPX" -H "Origin: http://localhost:$PORT_PX" \
+    -H "Connection: Upgrade" -H "Upgrade: websocket" \
+    -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" -H "Sec-WebSocket-Version: 13" \
+    "http://127.0.0.1:$PORT_PX/api/remote.mux")
+  [ "$ws_code" = "101" ] && break
+  [ "$ws_code" = "000" ] || break
+  sleep 1
+done
 rm -f "$CJPX"
 case "$ws_code" in
   101) pass "proxy: WebSocket upgrade to /api/remote.mux relayed (101 Switching Protocols)" ;;
